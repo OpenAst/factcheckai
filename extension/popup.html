@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SRT Fact-Check AI</title>
+  <style>
+    body {
+      width: 350px;
+      padding: 15px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      background: #f4f7f6;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      margin-bottom: 15px;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 10px;
+    }
+    .header h2 {
+      margin: 0;
+      font-size: 18px;
+      color: #2c3e50;
+    }
+    .content-box {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      margin-bottom: 15px;
+      min-height: 50px;
+      max-height: 150px;
+      overflow-y: auto;
+      font-size: 13px;
+    }
+    #result {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      font-size: 13px;
+      line-height: 1.4;
+      display: none;
+    }
+    button {
+      width: 100%;
+      background: #3498db;
+      color: white;
+      border: none;
+      padding: 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: background 0.3s;
+    }
+    button:hover {
+      background: #2980b9;
+    }
+    button:disabled {
+      background: #bdc3c7;
+    }
+    .loading {
+      text-align: center;
+      display: none;
+      margin-top: 10px;
+    }
+    .loading-dots:after {
+      content: '.';
+      animation: dots 1s steps(5, end) infinite;
+    }
+    @keyframes dots {
+      0%, 20% { content: '.'; }
+      40% { content: '..'; }
+      60% { content: '...'; }
+      80%, 100% { content: ''; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>SRT Fact-Check AI</h2>
+  </div>
+
+  <div id="detected-text" class="content-box">
+    Detecting content...
+  </div>
+
+  <button id="check-btn" disabled>Fact Check Claim</button>
+
+  <div id="loading" class="loading">
+    Analyzing claim<span class="loading-dots"></span>
+  </div>
+
+  <div id="result"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
