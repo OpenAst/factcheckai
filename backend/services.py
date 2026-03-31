@@ -29,7 +29,7 @@ class SerperService:
             return []
 
 class GeminiService:
-    def __init__(self, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, model_name: str = "gemini-1.5-flash-latest"):
         self.model = genai.GenerativeModel(model_name)
 
     def fact_check(self, text: str, search_results: List[Dict]) -> str:

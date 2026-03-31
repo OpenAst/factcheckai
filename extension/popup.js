@@ -1,5 +1,5 @@
 // Configure your backend URL here (e.g., https://your-app.onrender.com/factcheck)
-const BACKEND_URL = 'http://localhost:8000/factcheck';
+const BACKEND_URL = 'https://factcheckai-api.onrender.com/factcheck';
 
 document.addEventListener('DOMContentLoaded', async () => {
     const detectedTextDiv = document.getElementById('detected-text');
