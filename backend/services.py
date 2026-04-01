@@ -10,6 +10,23 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
+# List of candidate models to try
+CANDIDATE_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-pro",
+    "gemini-1.0-pro"
+]
+
+# Log available models at startup to help debugging
+try:
+    print("Listing available Gemini models...")
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            print(f"Available model: {m.name}")
+except Exception as e:
+    print(f"Error listing models: {e}")
+
 class SerperService:
     @staticmethod
     def search(query: str) -> List[Dict]:
@@ -30,7 +47,7 @@ class SerperService:
 
 class GeminiService:
     def __init__(self, model_name: str = "gemini-1.5-flash"):
-        self.model = genai.GenerativeModel(model_name)
+        self.default_model_name = model_name
 
     def fact_check(self, text: str, search_results: List[Dict]) -> str:
         # Prepare context from search results
@@ -58,8 +75,17 @@ class GeminiService:
         Format the response in Markdown for display in a Chrome Extension popup.
         """
         
-        try:
-            response = self.model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            return f"Fact-checking error: {str(e)}"
+        last_error = None
+        # Try candidate models in order
+        for model_name in CANDIDATE_MODELS:
+            try:
+                print(f"Attempting fact-check with model: {model_name}")
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                last_error = str(e)
+                print(f"Model {model_name} failed: {last_error}")
+                continue
+                
+        return f"Fact-checking error (all models failed): {last_error}"
