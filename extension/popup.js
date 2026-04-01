@@ -5,28 +5,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     const cacheBadge = document.getElementById('cache-badge');
     const copyBtn = document.getElementById('copy-btn');
 
+    const resultDiv = document.getElementById('result');
+    const retryBtn = document.getElementById('retry-btn');
+
     let extractedText = "";
 
-    // 1. Ask content script for text
-    try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab && tab.url.includes("facebook.com")) {
+    async function tryExtract() {
+        detectedTextDiv.value = "Detecting content...";
+        checkBtn.disabled = true;
+
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            // Allow all domains since manifest matches will filter appropriately
             chrome.tabs.sendMessage(tab.id, { action: "extractText" }, (response) => {
-                if (response && response.text) {
+                if (chrome.runtime.lastError) {
+                    detectedTextDiv.value = "Content script not responding. Try reloading the page.";
+                    return;
+                }
+
+                if (response && response.text && response.text.length > 0) {
                     extractedText = response.text;
                     detectedTextDiv.value = extractedText;
                     checkBtn.disabled = false;
                 } else {
-                    detectedTextDiv.innerText = "No claim detected. Try selecting text manually.";
-                    checkBtn.disabled = false; // Allow manual text selection if implemented
+                    detectedTextDiv.value = "No clear claim detected. You can type or paste the claim here manually.";
+                    checkBtn.disabled = false;
                 }
             });
-        } else {
-            detectedTextDiv.value = "Please open a Facebook review page to use this tool.";
+        } catch (err) {
+            detectedTextDiv.value = "Detection failed. Please select text manually.";
+            checkBtn.disabled = false;
         }
-    } catch (err) {
-        detectedTextDiv.value = "Extension ready. Select text to fact-check.";
     }
+
+    // Initial extraction
+    tryExtract();
+
+    // Retry button listener
+    retryBtn.addEventListener('click', tryExtract);
 
     // 2. Click handler for check button
     checkBtn.addEventListener('click', async () => {

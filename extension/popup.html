@@ -99,6 +99,17 @@
       background: #219150;
     }
 
+    .retry-btn {
+      margin-top: 5px;
+      background: #7f8c8d;
+      padding: 5px;
+      font-size: 11px;
+    }
+
+    .retry-btn:hover {
+      background: #95a5a6;
+    }
+
     canvas {
       display: none;
     }
@@ -156,6 +167,9 @@
   <textarea id="detected-text" class="content-box">
     Detecting content...
   </textarea>
+  <div style="display: flex; justify-content: flex-end; margin-top: -10px; margin-bottom: 10px;">
+    <button id="retry-btn" class="retry-btn" style="width: auto;">🔄 Retry Detection</button>
+  </div>
 
   <button id="check-btn" disabled>Fact Check Claim</button>
 

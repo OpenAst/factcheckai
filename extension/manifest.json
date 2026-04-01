@@ -17,6 +17,8 @@
     "https://*.facebook.com/*",
     "https://*.instagram.com/*",
     "https://*.threads.net/*",
+    "https://*.intern.facebook.com/*",
+    "https://*.our.intern.facebook.com/*",
     "https://factcheckai-api.onrender.com/*"
   ],
   "action": {
@@ -32,7 +34,9 @@
       "matches": [
         "https://*.facebook.com/*",
         "https://*.instagram.com/*",
-        "https://*.threads.net/*"
+        "https://*.threads.net/*",
+        "https://*.intern.facebook.com/*",
+        "https://*.our.intern.facebook.com/*"
       ],
       "js": [
         "content.js"

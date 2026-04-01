@@ -15,14 +15,18 @@ function extractSrtContent() {
     const contentHeader = allDivs.find(el => el.innerText.trim() === "Content In Review");
     if (contentHeader && contentHeader.nextElementSibling) {
         const text = contentHeader.nextElementSibling.innerText.trim();
-        if (text.length > 10) return text;
+        if (text.length > 0) return text;
     }
 
-    // 2. Target "Transcript" body
+    // 2. Target "Transcript" body (look for all text in siblings if it's a list)
     const transcriptHeader = allDivs.find(el => el.innerText.trim() === "Transcript");
-    if (transcriptHeader && transcriptHeader.nextElementSibling) {
-        const text = transcriptHeader.nextElementSibling.innerText.trim();
-        if (text.length > 10) return text;
+    if (transcriptHeader && transcriptHeader.parentElement) {
+        // Try to get all text from the container next to or below the header
+        const container = transcriptHeader.nextElementSibling || transcriptHeader.parentElement;
+        const text = container.innerText.trim();
+        // Filter out the header name itself if it was included
+        const cleanText = text.replace(/^Transcript\s+/i, '').trim();
+        if (cleanText.length > 5) return cleanText;
     }
 
     // 3. Fallback: Post messages or articles
