@@ -59,22 +59,30 @@ class GeminiService:
             context += f"Link: {res.get('link')}\n\n"
 
         prompt = f"""
-        You are an expert fact-checker for the SRT platform. 
-        Analyze the following claim based on the provided search results.
-        
-        Claim: "{text}"
-        
-        Search Results (Context):
-        {context}
-        
-        Please provide:
-        1. **Verdict**: (e.g., True, False, Misleading, No Evidence)
-        2. **Summary**: A concise explanation.
-        3. **Key Points**: Bullet points of evidence found.
-        4. **Source Links**: Links that support your verdict.
-        
-        Format the response in Markdown for display in a Chrome Extension popup.
-        """
+    You are an expert fact-checker for the SRT (Social Responsibility Tools) platform. 
+    Analyze the following claim extracted from a social media post or video transcript.
+    
+    CLAIM TEXT:
+    {text}
+    
+    SEARCH RESULTS FOR CONTEXT:
+    {context}
+    
+    YOUR TASK:
+    1. Determine the truthfulness of the claim based on the provided search results.
+    2. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or an old event being reshared?
+    3. Evaluate if the claim uses a 'True' event in a 'Misleading' or 'Out of Context' way (e.g., blaming a current politician for a 5-year-old event).
+    4. Provide a structured report in Markdown.
+    
+    STRUCTURE:
+    - Verdict: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
+    - Summary: (2-3 sentences explaining the core finding)
+    - Key Points: (Bullet points with supporting facts)
+    - Date Check: (Explicitly state if the event is current or from the past)
+    - Source Links: (Relevant links from the search results)
+    
+    If search results are empty or irrelevant, state 'Unverified' and explain why.
+    """
         
         last_error = None
         # Try candidate models in order
