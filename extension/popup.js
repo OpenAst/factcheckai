@@ -16,24 +16,58 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            // Allow all domains since manifest matches will filter appropriately
-            chrome.tabs.sendMessage(tab.id, { action: "extractText" }, (response) => {
-                if (chrome.runtime.lastError) {
-                    detectedTextDiv.value = "Content script not responding. Try reloading the page.";
-                    return;
-                }
 
-                if (response && response.text && response.text.length > 0) {
-                    extractedText = response.text;
-                    detectedTextDiv.value = extractedText;
-                    checkBtn.disabled = false;
-                } else {
-                    detectedTextDiv.value = "No clear claim detected. You can type or paste the claim here manually.";
-                    checkBtn.disabled = false;
+            // Execute extraction script directly in the tab
+            const results = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    const allElements = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, h5, h6'));
+
+                    function findByText(text) {
+                        const entry = allElements.find(el => {
+                            const inner = el.innerText.trim().toLowerCase();
+                            return inner === text.toLowerCase();
+                        });
+                        if (entry && entry.nextElementSibling) {
+                            return entry.nextElementSibling.innerText.trim();
+                        }
+                        return null;
+                    }
+
+                    // 1. Priority: "Content In Review"
+                    const inReview = findByText("Content In Review");
+                    if (inReview && inReview.length > 0) return inReview;
+
+                    // 2. Priority: "Transcript"
+                    const transcript = findByText("Transcript");
+                    if (transcript && transcript.length > 5) return transcript;
+
+                    // 3. Fallback: Any large text blocks
+                    const largeBlocks = allElements
+                        .filter(el => {
+                            if (el.children.length > 0) return false;
+                            const text = el.innerText.trim();
+                            return text.length > 50 && !text.includes("Detecting content");
+                        })
+                        .map(el => el.innerText.trim());
+
+                    if (largeBlocks.length > 0) return largeBlocks[0];
+
+                    // 4. Fallback: Selection
+                    return window.getSelection().toString().trim();
                 }
             });
+
+            if (results && results[0] && results[0].result) {
+                extractedText = results[0].result;
+                detectedTextDiv.value = extractedText;
+                checkBtn.disabled = false;
+            } else {
+                detectedTextDiv.value = "No clear claim detected. You can type or paste the claim here manually.";
+                checkBtn.disabled = false;
+            }
         } catch (err) {
-            detectedTextDiv.value = "Detection failed. Please select text manually.";
+            detectedTextDiv.value = "Detection failed. Please select or paste text manually.";
             checkBtn.disabled = false;
         }
     }
