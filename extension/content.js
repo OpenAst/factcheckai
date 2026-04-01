@@ -9,40 +9,42 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 function extractSrtContent() {
-    const allDivs = Array.from(document.querySelectorAll('div'));
+    const allElements = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, h5, h6'));
 
-    // 1. Target "Content In Review" body
-    const contentHeader = allDivs.find(el => el.innerText.trim() === "Content In Review");
-    if (contentHeader && contentHeader.nextElementSibling) {
-        const text = contentHeader.nextElementSibling.innerText.trim();
-        if (text.length > 0) return text;
-    }
-
-    // 2. Target "Transcript" body (look for all text in siblings if it's a list)
-    const transcriptHeader = allDivs.find(el => el.innerText.trim() === "Transcript");
-    if (transcriptHeader && transcriptHeader.parentElement) {
-        // Try to get all text from the container next to or below the header
-        const container = transcriptHeader.nextElementSibling || transcriptHeader.parentElement;
-        const text = container.innerText.trim();
-        // Filter out the header name itself if it was included
-        const cleanText = text.replace(/^Transcript\s+/i, '').trim();
-        if (cleanText.length > 5) return cleanText;
-    }
-
-    // 3. Fallback: Post messages or articles
-    const selectors = [
-        '[data-testid="post_message"]',
-        'article div[dir="auto"]',
-        'textarea'
-    ];
-
-    for (const selector of selectors) {
-        const element = document.querySelector(selector);
-        if (element && element.innerText.trim().length > 15) {
-            return element.innerText.trim();
+    function findByText(text) {
+        const entry = allElements.find(el => {
+            const inner = el.innerText.trim().toLowerCase();
+            return inner === text.toLowerCase();
+        });
+        if (entry && entry.nextElementSibling) {
+            return entry.nextElementSibling.innerText.trim();
         }
+        return null;
     }
 
-    // 4. Fallback: Current selection or prompt
+    // 1. Priority: "Content In Review"
+    const inReview = findByText("Content In Review");
+    if (inReview && inReview.length > 0) return inReview;
+
+    // 2. Priority: "Transcript"
+    const transcript = findByText("Transcript");
+    if (transcript && transcript.length > 5) return transcript;
+
+    // 3. Fallback: Any large text blocks (for internal tool custom layouts)
+    const largeBlocks = allElements
+        .filter(el => {
+            // Only direct text-containing elements to avoid capturing the whole <body>
+            if (el.children.length > 0) return false;
+            const text = el.innerText.trim();
+            return text.length > 50 && !text.includes("Detecting content");
+        })
+        .map(el => el.innerText.trim());
+
+    if (largeBlocks.length > 0) {
+        // Return the first significant block (usually the claim or the post body)
+        return largeBlocks[0];
+    }
+
+    // 4. Fallback: Selected text or prompt
     return window.getSelection().toString().trim() || "No clear claim detected. Please select the text manually.";
 }
