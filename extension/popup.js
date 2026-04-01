@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
+    const checkBtn = document.getElementById('check-btn');
+    const detectedTextDiv = document.getElementById('detected-text');
+    const loading = document.getElementById('loading');
 
     let extractedText = "";
 
