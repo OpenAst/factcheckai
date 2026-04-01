@@ -10,12 +10,13 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
-# List of candidate models to try
+# List of candidate models to try (Verified for 2026)
 CANDIDATE_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-pro",
-    "gemini-1.0-pro"
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "gemini-2.5-pro"
 ]
 
 # Log available models at startup to help debugging
