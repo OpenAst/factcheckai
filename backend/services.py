@@ -10,23 +10,12 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
-# List of candidate models to try (Verified for 2026)
+# List of candidate models to try (free-tier first, then paid fallbacks)
 CANDIDATE_MODELS = [
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-3-pro-preview",
-    "gemini-2.5-pro"
+    "gemini-2.0-flash",          # Free tier: 15 RPM, 1M TPM
+    "gemini-2.0-flash-lite",     # Free tier: 30 RPM, very fast
+    "gemini-1.5-flash"          # Free tier: 15 RPM, reliable
 ]
-
-# Log available models at startup to help debugging
-try:
-    print("Listing available Gemini models...")
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            print(f"Available model: {m.name}")
-except Exception as e:
-    print(f"Error listing models: {e}")
 
 class SerperService:
     @staticmethod
@@ -41,7 +30,16 @@ class SerperService:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             results = response.json()
-            return results.get("organic", [])[:5]  # Top 5 results
+            organic = results.get("organic", [])[:5]  # Top 5 results
+            # Normalize to consistent structure
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "link": r.get("link", ""),
+                    "snippet": r.get("snippet", "")
+                }
+                for r in organic
+            ]
         except Exception as e:
             print(f"Serper search error: {e}")
             return []
@@ -50,45 +48,12 @@ class GeminiService:
     def __init__(self, model_name: str = "gemini-1.5-flash"):
         self.default_model_name = model_name
 
-    def fact_check(self, text: str, search_results: List[Dict]) -> str:
-        # Prepare context from search results
-        context = ""
-        for i, res in enumerate(search_results):
-            context += f"Source {i+1}: {res.get('title')}\n"
-            context += f"Snippet: {res.get('snippet')}\n"
-            context += f"Link: {res.get('link')}\n\n"
-
-        prompt = f"""
-    You are an expert fact-checker for the SRT (Social Responsibility Tools) platform. 
-    Analyze the following claim extracted from a social media post or video transcript.
-    
-    CLAIM TEXT:
-    {text}
-    
-    SEARCH RESULTS FOR CONTEXT:
-    {context}
-    
-    YOUR TASK:
-    1. Determine the truthfulness of the claim based on the provided search results.
-    2. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or an old event being reshared?
-    3. Evaluate if the claim uses a 'True' event in a 'Misleading' or 'Out of Context' way (e.g., blaming a current politician for a 5-year-old event).
-    4. Provide a structured report in Markdown.
-    
-    STRUCTURE:
-    - Verdict: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
-    - Summary: (2-3 sentences explaining the core finding)
-    - Key Points: (Bullet points with supporting facts)
-    - Date Check: (Explicitly state if the event is current or from the past)
-    - Source Links: (Relevant links from the search results)
-    
-    If search results are empty or irrelevant, state 'Unverified' and explain why.
-    """
-        
+    def _call_model(self, prompt: str) -> str:
+        """Try each model in CANDIDATE_MODELS until one succeeds."""
         last_error = None
-        # Try candidate models in order
         for model_name in CANDIDATE_MODELS:
             try:
-                print(f"Attempting fact-check with model: {model_name}")
+                print(f"Attempting with model: {model_name}")
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
                 return response.text
@@ -96,5 +61,53 @@ class GeminiService:
                 last_error = str(e)
                 print(f"Model {model_name} failed: {last_error}")
                 continue
-                
-        return f"Fact-checking error (all models failed): {last_error}"
+        return f"AI error (all models failed): {last_error}"
+
+    def extract_claim(self, text: str) -> str:
+        """Use Gemini to isolate the single main factual claim from the text."""
+        prompt = f"""
+You are a fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
+Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
+
+TEXT:
+{text}
+
+MAIN CLAIM:"""
+        result = self._call_model(prompt)
+        # Clean up any leading labels Gemini might add
+        claim = result.strip().replace("MAIN CLAIM:", "").strip()
+        return claim if claim else text
+
+    def fact_check(self, claim: str, search_results: List[Dict]) -> str:
+        """Analyze the claim against search results and produce a verdict."""
+        context = ""
+        for i, res in enumerate(search_results):
+            context += f"Source {i+1}: {res.get('title')}\n"
+            context += f"Snippet: {res.get('snippet')}\n"
+            context += f"Link: {res.get('link')}\n\n"
+
+        prompt = f"""
+You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
+Analyze the following claim using the provided search results.
+
+CLAIM:
+{claim}
+
+SEARCH RESULTS:
+{context}
+
+YOUR TASK:
+1. Determine the truthfulness of the claim.
+2. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
+3. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
+4. Provide a structured report in Markdown.
+
+STRUCTURE:
+- **Verdict**: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
+- **Summary**: (2-3 sentences explaining the core finding)
+- **Key Points**: (Bullet points with supporting facts)
+- **Date Check**: (Explicitly state if the event is current or from the past)
+
+If search results are empty or irrelevant, state "Unverified" and explain why.
+"""
+        return self._call_model(prompt)

@@ -164,7 +164,7 @@
     <span id="cache-badge" class="badge badge-cached" style="display: none;">Cached</span>
   </div>
 
-  <textarea id="detected-text" class="content-box">
+  <textarea id="detected-text" class="content-box" style="min-height: 120px; height: 120px;">
     Detecting content...
   </textarea>
   <div style="display: flex; justify-content: flex-end; margin-top: -10px; margin-bottom: 10px;">
@@ -177,8 +177,22 @@
     Analyzing claim<span class="loading-dots"></span>
   </div>
 
+  <div id="extracted-claim-box"
+    style="display:none; font-size:12px; color:#888; margin-bottom:8px; background:#f5f5f5; border-radius:6px; padding:8px;">
+    <strong>Main Claim Identified:</strong> <span id="extracted-claim-text"></span>
+  </div>
+
   <div id="result"></div>
   <button id="copy-btn" class="copy-btn">Copy Report</button>
+
+  <div id="evidence-section" style="display:none; margin-top:12px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+      <strong style="font-size:13px;">Evidence Links</strong>
+      <button id="copy-links-btn" class="retry-btn" style="width:auto; font-size:11px; padding:4px 10px;">Copy All
+        Links</button>
+    </div>
+    <div id="evidence-links"></div>
+  </div>
 
   <script src="popup.js"></script>
 </body>

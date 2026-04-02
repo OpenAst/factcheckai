@@ -89,6 +89,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         copyBtn.style.display = 'none';
         cacheBadge.style.display = 'none';
 
+        const extractedClaimBox = document.getElementById('extracted-claim-box');
+        const extractedClaimText = document.getElementById('extracted-claim-text');
+        const evidenceSection = document.getElementById('evidence-section');
+        const evidenceLinksDiv = document.getElementById('evidence-links');
+        const copyLinksBtn = document.getElementById('copy-links-btn');
+
+        // Hide previous evidence
+        extractedClaimBox.style.display = 'none';
+        evidenceSection.style.display = 'none';
+        evidenceLinksDiv.innerHTML = '';
+
         try {
             // Read current text from textarea (user might have edited it)
             const textToAnalyze = detectedTextDiv.value;
@@ -106,18 +117,48 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Show cache badge if applicable
             if (data.is_cached) cacheBadge.style.display = 'inline-block';
 
-            // Show result and copy button
+            // Show extracted claim preview
+            if (data.extracted_claim && data.extracted_claim !== textToAnalyze) {
+                extractedClaimText.innerText = data.extracted_claim;
+                extractedClaimBox.style.display = 'block';
+            }
+
+            // Show verdict and copy button
             resultDiv.innerHTML = formatMarkdown(data.verdict_md);
             resultDiv.style.display = 'block';
             copyBtn.style.display = 'block';
 
-            // Store raw markdown for copying
+            // Copy report button
             copyBtn.onclick = () => {
                 navigator.clipboard.writeText(data.verdict_md);
-                const originalText = copyBtn.innerText;
+                const orig = copyBtn.innerText;
                 copyBtn.innerText = "Copied!";
-                setTimeout(() => copyBtn.innerText = originalText, 2000);
+                setTimeout(() => copyBtn.innerText = orig, 2000);
             };
+
+            // Render evidence links
+            if (data.evidence_links && data.evidence_links.length > 0) {
+                const allUrls = data.evidence_links.map(l => l.url).join('\n');
+
+                data.evidence_links.forEach(link => {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'margin-bottom:8px; padding:8px; background:#f5f5f5; border-radius:6px;';
+                    item.innerHTML = `
+                        <a href="${link.url}" target="_blank" class="report-link" style="font-weight:600; display:block; margin-bottom:3px;">${link.title}</a>
+                        <span style="font-size:11px; color:#555;">${link.snippet}</span>
+                    `;
+                    evidenceLinksDiv.appendChild(item);
+                });
+
+                copyLinksBtn.onclick = () => {
+                    navigator.clipboard.writeText(allUrls);
+                    const orig = copyLinksBtn.innerText;
+                    copyLinksBtn.innerText = "Copied!";
+                    setTimeout(() => copyLinksBtn.innerText = orig, 2000);
+                };
+
+                evidenceSection.style.display = 'block';
+            }
 
         } catch (err) {
             resultDiv.innerText = "Error: " + err.message;
