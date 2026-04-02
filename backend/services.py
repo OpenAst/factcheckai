@@ -1,6 +1,7 @@
 import os
 import requests
 import google.generativeai as genai
+from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
 
@@ -9,12 +10,20 @@ load_dotenv()
 # Configure APIs
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# List of candidate models to try (free-tier first, then paid fallbacks)
-CANDIDATE_MODELS = [
-    "gemini-2.0-flash",          # Free tier: 15 RPM, 1M TPM
-    "gemini-2.0-flash-lite",     # Free tier: 30 RPM, very fast
-    "gemini-1.5-flash"          # Free tier: 15 RPM, reliable
+# Groq models (primary - free tier)
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",   # Best quality free model
+    "llama-3.1-8b-instant",      # Fast fallback
+    "mixtral-8x7b-32768",        # Alternative fallback
+]
+
+# Gemini models (secondary fallback if Groq fails)
+GEMINI_MODELS = [
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
 ]
 
 class SerperService:
@@ -30,8 +39,7 @@ class SerperService:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             results = response.json()
-            organic = results.get("organic", [])[:5]  # Top 5 results
-            # Normalize to consistent structure
+            organic = results.get("organic", [])[:5]
             return [
                 {
                     "title": r.get("title", ""),
@@ -45,28 +53,58 @@ class SerperService:
             return []
 
 class GeminiService:
-    def __init__(self, model_name: str = "gemini-1.5-flash"):
-        self.default_model_name = model_name
+    def __init__(self):
+        self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-    def _call_model(self, prompt: str) -> str:
-        """Try each model in CANDIDATE_MODELS until one succeeds."""
+    def _call_groq(self, prompt: str) -> str:
+        """Try Groq models (free, fast)."""
+        if not self.groq_client:
+            raise Exception("No GROQ_API_KEY set")
         last_error = None
-        for model_name in CANDIDATE_MODELS:
+        for model in GROQ_MODELS:
             try:
-                print(f"Attempting with model: {model_name}")
+                print(f"Trying Groq model: {model}")
+                response = self.groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1024,
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = str(e)
+                print(f"Groq model {model} failed: {last_error}")
+                continue
+        raise Exception(f"All Groq models failed: {last_error}")
+
+    def _call_gemini(self, prompt: str) -> str:
+        """Try Gemini models as fallback."""
+        last_error = None
+        for model_name in GEMINI_MODELS:
+            try:
+                print(f"Trying Gemini model: {model_name}")
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
                 return response.text
             except Exception as e:
                 last_error = str(e)
-                print(f"Model {model_name} failed: {last_error}")
+                print(f"Gemini model {model_name} failed: {last_error}")
                 continue
-        return f"AI error (all models failed): {last_error}"
+        raise Exception(f"All Gemini models failed: {last_error}")
+
+    def _call_model(self, prompt: str) -> str:
+        """Try Groq first, then Gemini as fallback."""
+        try:
+            return self._call_groq(prompt)
+        except Exception as groq_err:
+            print(f"Groq failed, trying Gemini: {groq_err}")
+            try:
+                return self._call_gemini(prompt)
+            except Exception as gemini_err:
+                return f"AI error (all providers failed): Groq: {groq_err} | Gemini: {gemini_err}"
 
     def extract_claim(self, text: str) -> str:
-        """Use Gemini to isolate the single main factual claim from the text."""
-        prompt = f"""
-You are a fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
+        """Use AI to isolate the single main factual claim from the text."""
+        prompt = f"""You are a fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
 Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
 
 TEXT:
@@ -74,7 +112,6 @@ TEXT:
 
 MAIN CLAIM:"""
         result = self._call_model(prompt)
-        # Clean up any leading labels Gemini might add
         claim = result.strip().replace("MAIN CLAIM:", "").strip()
         return claim if claim else text
 
@@ -86,8 +123,7 @@ MAIN CLAIM:"""
             context += f"Snippet: {res.get('snippet')}\n"
             context += f"Link: {res.get('link')}\n\n"
 
-        prompt = f"""
-You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
+        prompt = f"""You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
 Analyze the following claim using the provided search results.
 
 CLAIM:
@@ -108,6 +144,5 @@ STRUCTURE:
 - **Key Points**: (Bullet points with supporting facts)
 - **Date Check**: (Explicitly state if the event is current or from the past)
 
-If search results are empty or irrelevant, state "Unverified" and explain why.
-"""
+If search results are empty or irrelevant, state "Unverified" and explain why."""
         return self._call_model(prompt)
