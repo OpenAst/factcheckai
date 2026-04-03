@@ -4,10 +4,10 @@ from pydantic import BaseModel
 from typing import List, Dict
 import re
 try:
-    from .services import SerperService, GeminiService
+    from .services import SerperService, GeminiService, VisionService
     from .database import init_db, CacheService
 except ImportError:
-    from services import SerperService, GeminiService
+    from services import SerperService, GeminiService, VisionService
     from database import init_db, CacheService
 
 app = FastAPI(title="SRT Fact-Check AI API")
@@ -153,11 +153,7 @@ async def perform_fact_check(request: FactCheckRequest):
     # 3. Analyze with Gemini
     result_md = gemini_service.fact_check(extracted_claim, search_results)
 
-    # 4. Save to cache if successful
-    if "Fact-checking error" not in result_md and "AI error" not in result_md:
-        CacheService.save_to_cache(request.text, result_md)
-
-    # 5. Format evidence links
+    # 4. Format evidence links
     evidence_links = [
         EvidenceLink(
             title=r.get("title", "Source"),
@@ -167,12 +163,41 @@ async def perform_fact_check(request: FactCheckRequest):
         for r in search_results if r.get("link")
     ]
 
+    # Convert evidence links to simple dicts for caching
+    evidence_links_for_cache = [
+        {"title": e.title, "url": e.url, "snippet": e.snippet} for e in evidence_links
+    ]
+
+    # 5. Save to cache if successful (include evidence links)
+    if "Fact-checking error" not in result_md and "AI error" not in result_md:
+        CacheService.save_to_cache(request.text, result_md, evidence_links_for_cache)
+
     return FactCheckResponse(
         verdict_md=result_md,
         extracted_claim=extracted_claim,
         evidence_links=evidence_links,
         is_cached=False
     )
+
+
+class OcrRequest(BaseModel):
+    images: List[str]
+
+
+@app.post('/ocr')
+async def ocr_images(req: OcrRequest):
+    if not req.images:
+        raise HTTPException(status_code=400, detail="No images provided")
+    aggregated = []
+    try:
+        for data_url in req.images:
+            res = VisionService.ocr_data_url(data_url)
+            text = res.get('text', '')
+            aggregated.append(text or '')
+        combined = '\n\n'.join([t for t in aggregated if t])
+        return {"texts": aggregated, "combined": combined}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OCR error: {e}")
 
 if __name__ == "__main__":
     import uvicorn

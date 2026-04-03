@@ -4,6 +4,12 @@ import google.generativeai as genai
 from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
+import base64
+
+try:
+    from google.cloud import vision
+except Exception:
+    vision = None
 
 load_dotenv()
 
@@ -146,3 +152,51 @@ STRUCTURE:
 
 If search results are empty or irrelevant, state "Unverified" and explain why."""
         return self._call_model(prompt)
+
+
+class VisionService:
+    """Simple wrapper around Google Cloud Vision for OCR and basic web detection.
+    Requires the `google-cloud-vision` package and credentials set via
+    `GOOGLE_APPLICATION_CREDENTIALS` or default application credentials.
+    """
+    @staticmethod
+    def ocr_image_bytes(image_bytes: bytes) -> Dict:
+        if vision is None:
+            raise Exception("google-cloud-vision not installed or could not be imported")
+        client = vision.ImageAnnotatorClient()
+        image = vision.Image(content=image_bytes)
+        # Use DOCUMENT_TEXT_DETECTION for denser text (good for overlaid text)
+        resp = client.document_text_detection(image=image)
+        text = ''
+        try:
+            text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
+        except Exception:
+            text = ''
+
+        # web detection (optional) to find similar pages and context
+        web_entities = []
+        try:
+            web = client.web_detection(image=image).web_detection
+            if web and web.web_entities:
+                for e in web.web_entities[:5]:
+                    web_entities.append({
+                        'description': e.description,
+                        'score': getattr(e, 'score', None)
+                    })
+        except Exception:
+            web_entities = []
+
+        return {'text': text or '', 'web_entities': web_entities}
+
+    @staticmethod
+    def ocr_data_url(data_url: str) -> Dict:
+        # data_url like: data:image/png;base64,....
+        if not data_url:
+            return {'text': '', 'web_entities': []}
+        try:
+            header, b64 = data_url.split(',', 1)
+            image_bytes = base64.b64decode(b64)
+            return VisionService.ocr_image_bytes(image_bytes)
+        except Exception as e:
+            print('VisionService ocr_data_url error:', e)
+            return {'text': '', 'web_entities': []}
