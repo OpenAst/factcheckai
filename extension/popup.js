@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
     const checkBtn = document.getElementById('check-btn');
+    const scanImagesBtn = document.getElementById('scan-images-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
 
@@ -80,6 +81,71 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Retry button listener
     retryBtn.addEventListener('click', tryExtract);
+
+    // Scan images for overlaid text using Tesseract.js (client-side OCR)
+    if (scanImagesBtn) {
+        scanImagesBtn.addEventListener('click', async () => {
+            scanImagesBtn.disabled = true;
+            detectedTextDiv.value = "Scanning images...";
+            try {
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => {
+                        const imgs = Array.from(document.images || []).filter(i => i.naturalWidth > 30 && i.naturalHeight > 10);
+                        const out = [];
+                        for (const img of imgs) {
+                            try {
+                                const canvas = document.createElement('canvas');
+                                canvas.width = img.naturalWidth;
+                                canvas.height = img.naturalHeight;
+                                const ctx = canvas.getContext('2d');
+                                ctx.drawImage(img, 0, 0);
+                                out.push({ src: img.src, dataUrl: canvas.toDataURL('image/png') });
+                            } catch (e) {
+                                // CORS or other issues: fall back to src only
+                                out.push({ src: img.src });
+                            }
+                        }
+                        return out;
+                    }
+                });
+
+                const images = (results && results[0] && results[0].result) || [];
+                if (!images.length) {
+                    detectedTextDiv.value = "No images found on this page.";
+                    scanImagesBtn.disabled = false;
+                    return;
+                }
+
+                let aggregated = "";
+                for (let i = 0; i < images.length; i++) {
+                    const img = images[i];
+                    detectedTextDiv.value = `OCR image ${i+1}/${images.length}...`;
+                    const src = img.dataUrl || img.src;
+                    try {
+                        const res = await Tesseract.recognize(src, 'eng');
+                        const text = res && res.data && res.data.text ? res.data.text.trim() : '';
+                        if (text.length > 0) aggregated += text + "\n\n";
+                    } catch (ocrErr) {
+                        console.warn('Tesseract OCR failed for image', img.src, ocrErr);
+                    }
+                }
+
+                if (aggregated.trim().length > 0) {
+                    detectedTextDiv.value = aggregated.trim();
+                    checkBtn.disabled = false;
+                } else {
+                    detectedTextDiv.value = "No readable text found in images.";
+                }
+
+            } catch (err) {
+                detectedTextDiv.value = "Image scanning failed: " + (err && err.message ? err.message : err);
+            } finally {
+                scanImagesBtn.disabled = false;
+            }
+        });
+    }
 
     // 2. Click handler for check button
     checkBtn.addEventListener('click', async () => {

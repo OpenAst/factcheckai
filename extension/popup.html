@@ -171,7 +171,10 @@
     <button id="retry-btn" class="retry-btn" style="width: auto;">Retry Detection</button>
   </div>
 
-  <button id="check-btn" disabled>Fact Check Claim</button>
+  <div style="display:flex; gap:8px; margin-bottom:10px;">
+    <button id="scan-images-btn" class="retry-btn" style="flex:1; width:auto;">Scan Images</button>
+    <button id="check-btn" disabled style="flex:2">Fact Check Claim</button>
+  </div>
 
   <div id="loading" class="loading">
     Analyzing claim<span class="loading-dots"></span>
@@ -194,6 +197,8 @@
     <div id="evidence-links"></div>
   </div>
 
+  <!-- Tesseract.js (client-side OCR). For best accuracy consider using server-side Vision APIs. -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@2.1.5/dist/tesseract.min.js"></script>
   <script src="popup.js"></script>
 </body>
 

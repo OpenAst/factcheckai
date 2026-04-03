@@ -11,6 +11,7 @@ def init_db():
             claim_hash TEXT PRIMARY KEY,
             claim_text TEXT,
             verdict_markdown TEXT,
+            evidence_json TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -25,22 +26,31 @@ class CacheService:
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT verdict_markdown FROM claim_cache WHERE claim_hash = ?", (claim_hash,))
+        cursor.execute("SELECT verdict_markdown, evidence_json FROM claim_cache WHERE claim_hash = ?", (claim_hash,))
         result = cursor.fetchone()
         conn.close()
-        
-        return result[0] if result else None
+        if not result:
+            return None
+        verdict = result[0]
+        evidence_json = result[1]
+        try:
+            import json
+            evidence = json.loads(evidence_json) if evidence_json else []
+        except Exception:
+            evidence = []
+        return {"verdict_markdown": verdict, "evidence_links": evidence}
 
     @staticmethod
-    def save_to_cache(claim_text: str, verdict_markdown: str):
+    def save_to_cache(claim_text: str, verdict_markdown: str, evidence_links=None):
         import hashlib
         claim_hash = hashlib.sha256(claim_text.encode()).hexdigest()
-        
+        import json
+        evidence_json = json.dumps(evidence_links or [])
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO claim_cache (claim_hash, claim_text, verdict_markdown) VALUES (?, ?, ?)",
-            (claim_hash, claim_text, verdict_markdown)
+            "INSERT OR REPLACE INTO claim_cache (claim_hash, claim_text, verdict_markdown, evidence_json) VALUES (?, ?, ?, ?)",
+            (claim_hash, claim_text, verdict_markdown, evidence_json)
         )
         conn.commit()
         conn.close()
