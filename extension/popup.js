@@ -96,14 +96,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const out = [];
                         for (const img of imgs) {
                             try {
-                                const canvas = document.createElement('canvas');
-                                canvas.width = img.naturalWidth;
-                                canvas.height = img.naturalHeight;
-                                const ctx = canvas.getContext('2d');
-                                ctx.drawImage(img, 0, 0);
-                                out.push({ src: img.src, dataUrl: canvas.toDataURL('image/png') });
+                                const rect = img.getBoundingClientRect();
+                                out.push({ src: img.src, rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, dpr: window.devicePixelRatio || 1 });
                             } catch (e) {
-                                // CORS or other issues: fall back to src only
                                 out.push({ src: img.src });
                             }
                         }
@@ -119,24 +114,118 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 let aggregated = "";
+                // First try per-image OCR when images are accessible directly (may fail due to CORS)
                 for (let i = 0; i < images.length; i++) {
                     const img = images[i];
                     detectedTextDiv.value = `OCR image ${i+1}/${images.length}...`;
-                    const src = img.dataUrl || img.src;
+                    // If image dataUrl isn't available due to CORS, we'll fallback to screenshot cropping below
                     try {
-                        const res = await Tesseract.recognize(src, 'eng');
-                        const text = res && res.data && res.data.text ? res.data.text.trim() : '';
-                        if (text.length > 0) aggregated += text + "\n\n";
+                        if (img.dataUrl) {
+                            const res = await Tesseract.recognize(img.dataUrl, 'eng');
+                            const text = res && res.data && res.data.text ? res.data.text.trim() : '';
+                            if (text.length > 0) aggregated += text + "\n\n";
+                        }
                     } catch (ocrErr) {
                         console.warn('Tesseract OCR failed for image', img.src, ocrErr);
                     }
                 }
 
+                // If we got some text, return it. Otherwise fall back to screenshot-based OCR.
                 if (aggregated.trim().length > 0) {
                     detectedTextDiv.value = aggregated.trim();
                     checkBtn.disabled = false;
                 } else {
-                    detectedTextDiv.value = "No readable text found in images.";
+                    detectedTextDiv.value = "No readable text found in images, trying full-page screenshot OCR...";
+                    try {
+                        // Capture visible tab screenshot
+                        const screenshotDataUrl = await new Promise((resolve, reject) => {
+                            chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
+                                if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
+                                resolve(dataUrl);
+                            });
+                        });
+
+                        // Create image from screenshot
+                        const screenshotImg = new Image();
+                        screenshotImg.src = screenshotDataUrl;
+                        await new Promise(r => (screenshotImg.onload = r));
+
+                        // For each detected image rect, crop the screenshot and OCR that region
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        const dpr = window.devicePixelRatio || 1;
+                        canvas.width = screenshotImg.naturalWidth;
+                        canvas.height = screenshotImg.naturalHeight;
+                        ctx.drawImage(screenshotImg, 0, 0);
+
+                        const cropDataUrls = [];
+                        for (let i = 0; i < images.length; i++) {
+                            const img = images[i];
+                            if (!img.rect) continue;
+                            detectedTextDiv.value = `OCR screenshot region ${i+1}/${images.length}...`;
+                            const left = Math.round(img.rect.left * img.dpr);
+                            const top = Math.round(img.rect.top * img.dpr);
+                            const width = Math.round(img.rect.width * img.dpr);
+                            const height = Math.round(img.rect.height * img.dpr);
+
+                            if (width <= 0 || height <= 0) continue;
+
+                            const cropCanvas = document.createElement('canvas');
+                            cropCanvas.width = width;
+                            cropCanvas.height = height;
+                            const cropCtx = cropCanvas.getContext('2d');
+                            try {
+                                cropCtx.drawImage(canvas, left, top, width, height, 0, 0, width, height);
+                                const cropDataUrl = cropCanvas.toDataURL('image/png');
+                                cropDataUrls.push(cropDataUrl);
+                                // Try Tesseract locally first for speed
+                                try {
+                                    const res = await Tesseract.recognize(cropDataUrl, 'eng');
+                                    const text = res && res.data && res.data.text ? res.data.text.trim() : '';
+                                    if (text.length > 0) aggregated += text + "\n\n";
+                                } catch (innerErr) {
+                                    console.warn('Local crop OCR failed, will try server-side', innerErr);
+                                }
+                            } catch (e) {
+                                console.warn('Crop prepare failed', e);
+                            }
+                        }
+
+                        if (aggregated.trim().length > 0) {
+                            detectedTextDiv.value = aggregated.trim();
+                            checkBtn.disabled = false;
+                        } else {
+                            // Try server-side OCR (Google Cloud Vision) via backend /ocr endpoint
+                            try {
+                                detectedTextDiv.value = "No readable text found locally; trying server-side OCR...";
+                                const ocrUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/ocr');
+                                const resp = await fetch(ocrUrl, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ images: cropDataUrls })
+                                });
+                                if (resp.ok) {
+                                    const j = await resp.json();
+                                    const combined = j.combined || (j.texts || []).join('\n\n');
+                                    if (combined && combined.trim().length > 0) {
+                                        detectedTextDiv.value = combined.trim();
+                                        checkBtn.disabled = false;
+                                    } else {
+                                        detectedTextDiv.value = "No readable text found in images after server OCR.";
+                                    }
+                                } else {
+                                    detectedTextDiv.value = "Server OCR failed: " + resp.statusText;
+                                }
+                            } catch (e) {
+                                console.warn('Server OCR failed', e);
+                                detectedTextDiv.value = "No readable text found in images after screenshot OCR.";
+                            }
+                        }
+
+                    } catch (capErr) {
+                        console.warn('Screenshot OCR fallback failed', capErr);
+                        detectedTextDiv.value = "Image scanning failed: " + (capErr && capErr.message ? capErr.message : capErr);
+                    }
                 }
 
             } catch (err) {
