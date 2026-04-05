@@ -5,6 +5,12 @@ from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
 import base64
+import io
+from urllib.parse import urlparse
+try:
+    from duckduckgo_search import ddg
+except Exception:
+    ddg = None
 
 try:
     from google.cloud import vision
@@ -17,6 +23,50 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
+RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",") if d.strip()]
+
+# Domains we treat as social media / user-generated content and want to exclude
+SOCIAL_DOMAINS = [
+    'twitter.com', 't.co', 'facebook.com', 'instagram.com', 'reddit.com',
+    'youtube.com', 'youtu.be', 'linkedin.com', 'tiktok.com', 'snapchat.com'
+]
+
+
+def _normalize_netloc(link: str) -> str:
+    try:
+        netloc = urlparse(link).netloc.lower()
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
+        return ''
+
+
+def _is_social_link(link: str) -> bool:
+    netloc = _normalize_netloc(link)
+    return any(s == netloc or netloc.endswith('.' + s) or s in netloc for s in SOCIAL_DOMAINS)
+
+
+def _is_preferred_news(link: str) -> bool:
+    if not RELIABLE_NEWS_DOMAINS:
+        return False
+    netloc = _normalize_netloc(link)
+    return any(netloc == d or netloc.endswith('.' + d) for d in RELIABLE_NEWS_DOMAINS)
+
+
+def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dict]:
+    # Exclude obvious social/user-generated links
+    filtered = [r for r in results if r.get('link') and not _is_social_link(r.get('link'))]
+    # Prefer reliable news domains if provided
+    if RELIABLE_NEWS_DOMAINS:
+        preferred = [r for r in filtered if _is_preferred_news(r.get('link'))]
+        others = [r for r in filtered if not _is_preferred_news(r.get('link'))]
+        ordered = preferred + others
+    else:
+        ordered = filtered
+    return ordered[:max_results]
 
 # Groq models (primary - free tier)
 GROQ_MODELS = [
@@ -45,8 +95,8 @@ class SerperService:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             results = response.json()
-            organic = results.get("organic", [])[:5]
-            return [
+            organic = results.get("organic", [])
+            parsed = [
                 {
                     "title": r.get("title", ""),
                     "link": r.get("link", ""),
@@ -54,8 +104,33 @@ class SerperService:
                 }
                 for r in organic
             ]
+            return filter_search_results(parsed)
         except Exception as e:
             print(f"Serper search error: {e}")
+            return []
+
+
+class DuckDuckGoService:
+    @staticmethod
+    def search(query: str, max_results: int = 5) -> List[Dict]:
+        """Use duckduckgo_search.ddg if installed to get organic results.
+        Returns list of dicts with keys: title, link, snippet
+        """
+        if ddg is None:
+            print('duckduckgo_search not available')
+            return []
+        try:
+            results = ddg(query, max_results=max_results)
+            out = []
+            for r in results:
+                out.append({
+                    'title': r.get('title') or r.get('text') or '',
+                    'link': r.get('href') or r.get('link') or r.get('url') or '',
+                    'snippet': r.get('body') or r.get('snippet') or ''
+                })
+            return filter_search_results(out)
+        except Exception as e:
+            print('DuckDuckGo search error:', e)
             return []
 
 class GeminiService:
@@ -161,32 +236,46 @@ class VisionService:
     """
     @staticmethod
     def ocr_image_bytes(image_bytes: bytes) -> Dict:
-        if vision is None:
-            raise Exception("google-cloud-vision not installed or could not be imported")
-        client = vision.ImageAnnotatorClient()
-        image = vision.Image(content=image_bytes)
-        # Use DOCUMENT_TEXT_DETECTION for denser text (good for overlaid text)
-        resp = client.document_text_detection(image=image)
-        text = ''
-        try:
-            text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
-        except Exception:
-            text = ''
+        # Prefer Google Cloud Vision if available and configured
+        if vision is not None:
+            try:
+                client = vision.ImageAnnotatorClient()
+                image = vision.Image(content=image_bytes)
+                # Use DOCUMENT_TEXT_DETECTION for denser text (good for overlaid text)
+                resp = client.document_text_detection(image=image)
+                text = ''
+                try:
+                    text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
+                except Exception:
+                    text = ''
 
-        # web detection (optional) to find similar pages and context
-        web_entities = []
-        try:
-            web = client.web_detection(image=image).web_detection
-            if web and web.web_entities:
-                for e in web.web_entities[:5]:
-                    web_entities.append({
-                        'description': e.description,
-                        'score': getattr(e, 'score', None)
-                    })
-        except Exception:
-            web_entities = []
+                # web detection (optional) to find similar pages and context
+                web_entities = []
+                try:
+                    web = client.web_detection(image=image).web_detection
+                    if web and web.web_entities:
+                        for e in web.web_entities[:5]:
+                            web_entities.append({
+                                'description': e.description,
+                                'score': getattr(e, 'score', None)
+                            })
+                except Exception:
+                    web_entities = []
 
-        return {'text': text or '', 'web_entities': web_entities}
+                return {'text': text or '', 'web_entities': web_entities}
+            except Exception as e:
+                print('Google Vision failed:', e)
+
+        # Fallback: try local OCR with pytesseract if google vision not available
+        try:
+            from PIL import Image
+            import pytesseract
+            img = Image.open(io.BytesIO(image_bytes))
+            text = pytesseract.image_to_string(img)
+            return {'text': text or '', 'web_entities': []}
+        except Exception as e:
+            print('Pytesseract OCR fallback failed:', e)
+            raise Exception('No OCR available: install google-cloud-vision with credentials or pytesseract + pillow')
 
     @staticmethod
     def ocr_data_url(data_url: str) -> Dict:

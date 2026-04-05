@@ -1,13 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import re
 try:
-    from .services import SerperService, GeminiService, VisionService
+    from .services import SerperService, GeminiService, VisionService, DuckDuckGoService
     from .database import init_db, CacheService
 except ImportError:
-    from services import SerperService, GeminiService, VisionService
+    from services import SerperService, GeminiService, VisionService, DuckDuckGoService
     from database import init_db, CacheService
 
 app = FastAPI(title="SRT Fact-Check AI API")
@@ -23,6 +23,8 @@ app.add_middleware(
 
 class FactCheckRequest(BaseModel):
     text: str
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
 
 class EvidenceLink(BaseModel):
     title: str
@@ -92,15 +94,31 @@ async def perform_fact_check(request: FactCheckRequest):
         return False
 
     # 2. Search for information using the extracted claim (possibly enhanced)
-    search_query = extracted_claim
+    # Always append ':fact check' to bias searches towards fact-check pages
+    search_query = f"{extracted_claim} :fact check"
+
+    # For scam-like claims, add extra keywords
     if _is_scam_like(extracted_claim) or _is_scam_like(request.text):
         search_query = f"{extracted_claim} scam misleading fact check"
+        # ensure ':fact check' is present
+        if ':fact check' not in search_query:
+            search_query = f"{search_query} :fact check"
         print(f"Enhanced search query for scam-like claim: {search_query}")
 
-    search_results = SerperService.search(search_query)
+    # Prefer DuckDuckGo results when available
+    search_results = []
+    try:
+        ddg_results = DuckDuckGoService.search(search_query, max_results=8)
+        if ddg_results:
+            search_results = ddg_results
+        else:
+            search_results = SerperService.search(search_query)
+    except Exception as e:
+        print('DuckDuckGo search failed, falling back to Serper:', e)
+        search_results = SerperService.search(search_query)
 
     # 2b. Filter search results to prefer credible sources and exclude social media/unofficial sites
-    def _filter_credible(results):
+    def _filter_credible(results, category: Optional[str] = None):
         import urllib.parse
         # Blacklist known social and unofficial domains
         blacklist = [
@@ -110,11 +128,21 @@ async def perform_fact_check(request: FactCheckRequest):
         ]
 
         # Allowlist authoritative news and fact-check domains (expand as needed)
-        allowlist = [
+        global_allowlist = [
             'reuters.com', 'apnews.com', 'bbc.co.uk', 'bbc.com', 'nytimes.com', 'washingtonpost.com',
             'theguardian.com', 'cnn.com', 'bloomberg.com', 'economist.com', 'factcheck.org', 'snopes.com',
             'politifact.com', 'fullfact.org', 'afp.com'
         ]
+
+        # Category-specific allowlists to prioritize domain authority per topic
+        category_allowlists = {
+            'health': ['cdc.gov', 'who.int', 'nejm.org', 'hmh.com'],
+            'politics': ['nytimes.com', 'washingtonpost.com', 'politifact.com', 'factcheck.org'],
+            'economy': ['ft.com', 'economist.com', 'bloomberg.com', 'wsj.com'],
+            'science': ['nature.com', 'sciencemag.org', 'who.int'],
+            'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com'],
+            'default': global_allowlist
+        }
 
         filtered = []
         prefer = []
@@ -130,8 +158,16 @@ async def perform_fact_check(request: FactCheckRequest):
             if any(b in host for b in blacklist):
                 continue
 
-            # Prefer allowlist
-            if any(a in host for a in allowlist) or host.endswith('.gov') or host.endswith('.edu'):
+            # Prefer category-specific allowlist first, then global
+            preferred = False
+            if category:
+                cat = category.lower()
+                cat_list = category_allowlists.get(cat, [])
+                if any(a in host for a in cat_list):
+                    preferred = True
+            if not preferred and any(a in host for a in global_allowlist):
+                preferred = True
+            if preferred or host.endswith('.gov') or host.endswith('.edu'):
                 prefer.append(r)
             else:
                 # Heuristic: include if domain contains 'news' or title/snippet mentions 'report' or 'says'
@@ -146,7 +182,7 @@ async def perform_fact_check(request: FactCheckRequest):
         # Otherwise return filtered heuristics (may be empty)
         return filtered or results
 
-    filtered_results = _filter_credible(search_results)
+    filtered_results = _filter_credible(search_results, category=request.category)
     # Use filtered results for evidence links and fact-checking
     search_results = filtered_results
 
