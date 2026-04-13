@@ -1,6 +1,7 @@
 import os
 import requests
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
@@ -19,8 +20,7 @@ except Exception:
 
 load_dotenv()
 
-# Configure APIs
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -136,6 +136,7 @@ class DuckDuckGoService:
 class GeminiService:
     def __init__(self):
         self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+        self.gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
     def _call_groq(self, prompt: str) -> str:
         """Try Groq models (free, fast)."""
@@ -159,13 +160,17 @@ class GeminiService:
 
     def _call_gemini(self, prompt: str) -> str:
         """Try Gemini models as fallback."""
+        if not self.gemini_client:
+            raise Exception("No GEMINI_API_KEY set")
         last_error = None
         for model_name in GEMINI_MODELS:
             try:
                 print(f"Trying Gemini model: {model_name}")
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                return response.text
+                response = self.gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                return getattr(response, "text", "") or ""
             except Exception as e:
                 last_error = str(e)
                 print(f"Gemini model {model_name} failed: {last_error}")
@@ -235,9 +240,38 @@ class VisionService:
     `GOOGLE_APPLICATION_CREDENTIALS` or default application credentials.
     """
     @staticmethod
-    def ocr_image_bytes(image_bytes: bytes) -> Dict:
+    def _vision_credentials_available() -> bool:
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if not credentials_path:
+            return False
+        return os.path.isfile(credentials_path)
+
+    @staticmethod
+    def _ocr_with_gemini(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
+        if not GEMINI_API_KEY:
+            return {'text': '', 'web_entities': []}
+
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[
+                    "Extract all readable text from this image, especially overlaid post text. "
+                    "Return only the detected text, preserving line breaks as much as possible. "
+                    "If no readable text is visible, return an empty response.",
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                ],
+            )
+            text = (getattr(response, "text", "") or "").strip()
+            return {'text': text, 'web_entities': []}
+        except Exception as e:
+            print('Gemini OCR fallback failed:', e)
+            return {'text': '', 'web_entities': []}
+
+    @staticmethod
+    def ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
         # Prefer Google Cloud Vision if available and configured
-        if vision is not None:
+        if vision is not None and VisionService._vision_credentials_available():
             try:
                 client = vision.ImageAnnotatorClient()
                 image = vision.Image(content=image_bytes)
@@ -265,6 +299,12 @@ class VisionService:
                 return {'text': text or '', 'web_entities': web_entities}
             except Exception as e:
                 print('Google Vision failed:', e)
+        elif vision is not None and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            print('Skipping Google Vision: GOOGLE_APPLICATION_CREDENTIALS does not point to a valid file')
+
+        gemini_result = VisionService._ocr_with_gemini(image_bytes, mime_type=mime_type)
+        if gemini_result.get('text'):
+            return gemini_result
 
         # Fallback: try local OCR with pytesseract if google vision not available
         try:
@@ -284,8 +324,11 @@ class VisionService:
             return {'text': '', 'web_entities': []}
         try:
             header, b64 = data_url.split(',', 1)
+            mime_type = "image/png"
+            if header.startswith("data:") and ";" in header:
+                mime_type = header[5:].split(";", 1)[0] or mime_type
             image_bytes = base64.b64decode(b64)
-            return VisionService.ocr_image_bytes(image_bytes)
+            return VisionService.ocr_image_bytes(image_bytes, mime_type=mime_type)
         except Exception as e:
             print('VisionService ocr_data_url error:', e)
             return {'text': '', 'web_entities': []}

@@ -1,16 +1,26 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import re
+import os
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 try:
-    from .services import SerperService, GeminiService, VisionService, DuckDuckGoService
+    from .services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
     from .database import init_db, CacheService
 except ImportError:
-    from services import SerperService, GeminiService, VisionService, DuckDuckGoService
+    from services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
     from database import init_db, CacheService
 
-app = FastAPI(title="SRT Fact-Check AI API")
+load_dotenv()
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    yield
+
+app = FastAPI(lifespan=lifespan, title="SRT Fact-Check AI API")
 
 # Enable CORS for the Chrome Extension
 app.add_middleware(
@@ -39,13 +49,31 @@ class FactCheckResponse(BaseModel):
 
 gemini_service = GeminiService()
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
+# Admin token for simple auth on cache listing endpoint
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/")
+def root():
+    return {"message": "SRT Fact-Check AI API", "health": "/health", "admin_cache": "/admin/cache"}
+
+
+@app.get('/admin/cache')
+def admin_list_cache(x_admin_token: Optional[str] = Header(None)):
+    """Return cached claim entries. Protected by `ADMIN_TOKEN` env var via header `x-admin-token`."""
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access not configured. Set ADMIN_TOKEN in backend/.env and send it as the x-admin-token header.",
+        )
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    entries = CacheService.list_cache()
+    return {"cache": entries}
 
 @app.post("/factcheck", response_model=FactCheckResponse)
 async def perform_fact_check(request: FactCheckRequest):
@@ -59,10 +87,11 @@ async def perform_fact_check(request: FactCheckRequest):
         # Return cached verdict and evidence links when available
         verdict_md = cached_result.get("verdict_markdown")
         evidence_links_cached = cached_result.get("evidence_links", [])
-        # Map cached evidence items into EvidenceLink models
+        # Filter cached evidence to exclude social/user-generated links, then map
+        filtered_cached = [e for e in (evidence_links_cached or []) if e.get('url') and not _is_social_link(e.get('url'))]
         evidence_links_resp = [
             EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
-            for e in evidence_links_cached
+            for e in filtered_cached
         ]
         return FactCheckResponse(verdict_md=verdict_md, extracted_claim="", evidence_links=evidence_links_resp, is_cached=True)
 
@@ -122,7 +151,7 @@ async def perform_fact_check(request: FactCheckRequest):
         import urllib.parse
         # Blacklist known social and unofficial domains
         blacklist = [
-            'facebook.com', 'm.facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com',
+            'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com',
             'reddit.com', 'youtube.com', 'medium.com', 'quora.com', 'blogspot.com', 'wordpress.com',
             'pinterest.com', 'linkedin.com'
         ]
@@ -147,26 +176,42 @@ async def perform_fact_check(request: FactCheckRequest):
         filtered = []
         prefer = []
         for r in results:
-            link = r.get('link', '') or ''
+            # Normalize potential link keys
+            link = (r.get('link') or r.get('url') or r.get('href') or r.get('source') or '')
+            r['link'] = link
             try:
                 host = urllib.parse.urlparse(link).hostname or ''
                 host = host.lower()
+                if host.startswith('www.'):
+                    host = host[4:]
             except Exception:
                 host = ''
 
-            # Exclude blacklisted domains
-            if any(b in host for b in blacklist):
-                continue
+            # Exclude blacklisted domains (exact or subdomain match)
+            if host:
+                skip = False
+                for b in blacklist:
+                    if host == b or host.endswith('.' + b):
+                        skip = True
+                        break
+                if skip:
+                    continue
 
             # Prefer category-specific allowlist first, then global
             preferred = False
             if category:
                 cat = category.lower()
                 cat_list = category_allowlists.get(cat, [])
-                if any(a in host for a in cat_list):
-                    preferred = True
-            if not preferred and any(a in host for a in global_allowlist):
-                preferred = True
+                for a in cat_list:
+                    if host == a or host.endswith('.' + a):
+                        preferred = True
+                        break
+            if not preferred:
+                for a in global_allowlist:
+                    if host == a or host.endswith('.' + a):
+                        preferred = True
+                        break
+
             if preferred or host.endswith('.gov') or host.endswith('.edu'):
                 prefer.append(r)
             else:
@@ -189,14 +234,15 @@ async def perform_fact_check(request: FactCheckRequest):
     # 3. Analyze with Gemini
     result_md = gemini_service.fact_check(extracted_claim, search_results)
 
-    # 4. Format evidence links
+    # 4. Format evidence links (defensive: exclude any social/user-generated links)
+    safe_results = [r for r in search_results if r.get('link') and not _is_social_link(r.get('link'))]
     evidence_links = [
         EvidenceLink(
             title=r.get("title", "Source"),
             url=r.get("link", ""),
             snippet=r.get("snippet", "")
         )
-        for r in search_results if r.get("link")
+        for r in safe_results
     ]
 
     # Convert evidence links to simple dicts for caching

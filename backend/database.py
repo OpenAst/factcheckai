@@ -54,3 +54,25 @@ class CacheService:
         )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def list_cache():
+        import json
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT claim_text, verdict_markdown, evidence_json, timestamp FROM claim_cache ORDER BY timestamp DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for claim_text, verdict, evidence_json, ts in rows:
+            try:
+                evidence = json.loads(evidence_json) if evidence_json else []
+            except Exception:
+                evidence = []
+            out.append({
+                "claim_text": claim_text,
+                "verdict_markdown": verdict,
+                "evidence_links": evidence,
+                "timestamp": ts
+            })
+        return out
