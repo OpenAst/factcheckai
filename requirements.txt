@@ -7,4 +7,3 @@ gunicorn
 python-dotenv
 google-cloud-vision
 duckduckgo_search
-tesseract-ocr
