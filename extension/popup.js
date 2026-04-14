@@ -11,8 +11,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     const scanImagesBtn = document.getElementById('scan-images-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
+    const saveReviewStatus = document.getElementById('save-review-status');
 
     let extractedText = "";
+    let currentFactCheckData = null;
+
+    function setMiniStatus(message, isError = false) {
+        saveReviewStatus.style.display = 'block';
+        saveReviewStatus.textContent = message;
+        saveReviewStatus.style.background = isError ? '#fff1f0' : '#ecf9f6';
+        saveReviewStatus.style.borderColor = isError ? '#f5c6cb' : '#cdeee6';
+        saveReviewStatus.style.color = isError ? '#8a1f17' : '#2c3e50';
+    }
+
+    async function saveSelectedEvidence(link) {
+        if (!currentFactCheckData) {
+            setMiniStatus('No fact-check result is loaded yet.', true);
+            return;
+        }
+
+        try {
+            const reviewUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/reviews');
+            const resp = await fetch(reviewUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    post_text: currentFactCheckData.post_text || detectedTextDiv.value,
+                    extracted_claim: currentFactCheckData.extracted_claim || '',
+                    claim_status: currentFactCheckData.claim_status || 'factual_claim',
+                    verdict_md: currentFactCheckData.verdict_md || '',
+                    selected_evidence_url: link.url,
+                    selected_evidence_title: link.title || '',
+                    selected_evidence_snippet: link.snippet || '',
+                    evidence_links: currentFactCheckData.evidence_links || []
+                })
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || 'Could not save selected evidence');
+            setMiniStatus('Selected evidence saved to the review database.');
+        } catch (err) {
+            setMiniStatus(err.message || 'Could not save selected evidence.', true);
+        }
+    }
 
     async function tryExtract() {
         detectedTextDiv.value = "Detecting content...";
@@ -113,119 +153,76 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                 }
 
-                let aggregated = "";
-                // First try per-image OCR when images are accessible directly (may fail due to CORS)
-                for (let i = 0; i < images.length; i++) {
-                    const img = images[i];
-                    detectedTextDiv.value = `OCR image ${i+1}/${images.length}...`;
-                    // If image dataUrl isn't available due to CORS, we'll fallback to screenshot cropping below
-                    try {
-                        if (img.dataUrl) {
-                            const res = await Tesseract.recognize(img.dataUrl, 'eng');
-                            const text = res && res.data && res.data.text ? res.data.text.trim() : '';
-                            if (text.length > 0) aggregated += text + "\n\n";
-                        }
-                    } catch (ocrErr) {
-                        console.warn('Tesseract OCR failed for image', img.src, ocrErr);
-                    }
-                }
-
-                // If we got some text, return it. Otherwise fall back to screenshot-based OCR.
-                if (aggregated.trim().length > 0) {
-                    detectedTextDiv.value = aggregated.trim();
-                    checkBtn.disabled = false;
-                } else {
-                    detectedTextDiv.value = "No readable text found in images, trying full-page screenshot OCR...";
-                    try {
-                        // Capture visible tab screenshot
-                        const screenshotDataUrl = await new Promise((resolve, reject) => {
-                            chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-                                if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
-                                resolve(dataUrl);
-                            });
+                detectedTextDiv.value = "Capturing screenshot for backend OCR...";
+                try {
+                    const screenshotDataUrl = await new Promise((resolve, reject) => {
+                        chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
+                            if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
+                            resolve(dataUrl);
                         });
+                    });
 
-                        // Create image from screenshot
-                        const screenshotImg = new Image();
-                        screenshotImg.src = screenshotDataUrl;
-                        await new Promise(r => (screenshotImg.onload = r));
+                    const screenshotImg = new Image();
+                    screenshotImg.src = screenshotDataUrl;
+                    await new Promise(r => (screenshotImg.onload = r));
 
-                        // For each detected image rect, crop the screenshot and OCR that region
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        const dpr = window.devicePixelRatio || 1;
-                        canvas.width = screenshotImg.naturalWidth;
-                        canvas.height = screenshotImg.naturalHeight;
-                        ctx.drawImage(screenshotImg, 0, 0);
+                    const fullCanvas = document.createElement('canvas');
+                    fullCanvas.width = screenshotImg.naturalWidth;
+                    fullCanvas.height = screenshotImg.naturalHeight;
+                    const fullCtx = fullCanvas.getContext('2d');
+                    fullCtx.drawImage(screenshotImg, 0, 0);
 
-                        const cropDataUrls = [];
-                        for (let i = 0; i < images.length; i++) {
-                            const img = images[i];
-                            if (!img.rect) continue;
-                            detectedTextDiv.value = `OCR screenshot region ${i+1}/${images.length}...`;
-                            const left = Math.round(img.rect.left * img.dpr);
-                            const top = Math.round(img.rect.top * img.dpr);
-                            const width = Math.round(img.rect.width * img.dpr);
-                            const height = Math.round(img.rect.height * img.dpr);
+                    const cropDataUrls = [];
+                    for (let i = 0; i < images.length; i++) {
+                        const img = images[i];
+                        if (!img.rect) continue;
+                        detectedTextDiv.value = `Preparing image region ${i + 1}/${images.length}...`;
+                        const left = Math.max(0, Math.round(img.rect.left * img.dpr));
+                        const top = Math.max(0, Math.round(img.rect.top * img.dpr));
+                        const width = Math.round(img.rect.width * img.dpr);
+                        const height = Math.round(img.rect.height * img.dpr);
 
-                            if (width <= 0 || height <= 0) continue;
+                        if (width <= 20 || height <= 20) continue;
 
-                            const cropCanvas = document.createElement('canvas');
-                            cropCanvas.width = width;
-                            cropCanvas.height = height;
-                            const cropCtx = cropCanvas.getContext('2d');
-                            try {
-                                cropCtx.drawImage(canvas, left, top, width, height, 0, 0, width, height);
-                                const cropDataUrl = cropCanvas.toDataURL('image/png');
-                                cropDataUrls.push(cropDataUrl);
-                                // Try Tesseract locally first for speed
-                                try {
-                                    const res = await Tesseract.recognize(cropDataUrl, 'eng');
-                                    const text = res && res.data && res.data.text ? res.data.text.trim() : '';
-                                    if (text.length > 0) aggregated += text + "\n\n";
-                                } catch (innerErr) {
-                                    console.warn('Local crop OCR failed, will try server-side', innerErr);
-                                }
-                            } catch (e) {
-                                console.warn('Crop prepare failed', e);
-                            }
-                        }
-
-                        if (aggregated.trim().length > 0) {
-                            detectedTextDiv.value = aggregated.trim();
-                            checkBtn.disabled = false;
-                        } else {
-                            // Try server-side OCR (Google Cloud Vision) via backend /ocr endpoint
-                            try {
-                                detectedTextDiv.value = "No readable text found locally; trying server-side OCR...";
-                                const ocrUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/ocr');
-                                const resp = await fetch(ocrUrl, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ images: cropDataUrls })
-                                });
-                                if (resp.ok) {
-                                    const j = await resp.json();
-                                    const combined = j.combined || (j.texts || []).join('\n\n');
-                                    if (combined && combined.trim().length > 0) {
-                                        detectedTextDiv.value = combined.trim();
-                                        checkBtn.disabled = false;
-                                    } else {
-                                        detectedTextDiv.value = "No readable text found in images after server OCR.";
-                                    }
-                                } else {
-                                    detectedTextDiv.value = "Server OCR failed: " + resp.statusText;
-                                }
-                            } catch (e) {
-                                console.warn('Server OCR failed', e);
-                                detectedTextDiv.value = "No readable text found in images after screenshot OCR.";
-                            }
-                        }
-
-                    } catch (capErr) {
-                        console.warn('Screenshot OCR fallback failed', capErr);
-                        detectedTextDiv.value = "Image scanning failed: " + (capErr && capErr.message ? capErr.message : capErr);
+                        const cropCanvas = document.createElement('canvas');
+                        cropCanvas.width = width;
+                        cropCanvas.height = height;
+                        const cropCtx = cropCanvas.getContext('2d');
+                        cropCtx.drawImage(fullCanvas, left, top, width, height, 0, 0, width, height);
+                        cropDataUrls.push(cropCanvas.toDataURL('image/png'));
                     }
+
+                    if (!cropDataUrls.length) {
+                        cropDataUrls.push(screenshotDataUrl);
+                    }
+
+                    detectedTextDiv.value = "Sending images to backend OCR...";
+                    const ocrUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/ocr');
+                    const resp = await fetch(ocrUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ images: cropDataUrls })
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) throw new Error(data.detail || 'Server OCR failed');
+
+                    const combined = (data.combined || '').trim();
+                    if (combined) {
+                        detectedTextDiv.value = combined;
+                        checkBtn.disabled = false;
+                    } else if ((data.web_entities || []).length) {
+                        const hints = data.web_entities
+                            .map(entity => entity.description)
+                            .filter(Boolean)
+                            .slice(0, 5)
+                            .join(', ');
+                        detectedTextDiv.value = `No readable text found, but related web hints were detected: ${hints}`;
+                    } else {
+                        detectedTextDiv.value = "No readable text found in images after backend OCR.";
+                    }
+                } catch (capErr) {
+                    console.warn('Backend-first OCR flow failed', capErr);
+                    detectedTextDiv.value = "Image scanning failed: " + (capErr && capErr.message ? capErr.message : capErr);
                 }
 
             } catch (err) {
@@ -243,6 +240,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         resultDiv.style.display = 'none';
         copyBtn.style.display = 'none';
         cacheBadge.style.display = 'none';
+        currentFactCheckData = null;
+        saveReviewStatus.style.display = 'none';
 
         const extractedClaimBox = document.getElementById('extracted-claim-box');
         const extractedClaimText = document.getElementById('extracted-claim-text');
@@ -268,6 +267,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!response.ok) throw new Error('Backend error: ' + response.statusText);
 
             const data = await response.json();
+            currentFactCheckData = {
+                ...data,
+                post_text: textToAnalyze
+            };
 
             // Show cache badge if applicable
             if (data.is_cached) cacheBadge.style.display = 'inline-block';
@@ -298,10 +301,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                 data.evidence_links.forEach(link => {
                     const item = document.createElement('div');
                     item.style.cssText = 'margin-bottom:8px; padding:8px; background:#f5f5f5; border-radius:6px;';
-                    item.innerHTML = `
-                        <a href="${link.url}" target="_blank" class="report-link" style="font-weight:600; display:block; margin-bottom:3px;">${link.title}</a>
-                        <span style="font-size:11px; color:#555;">${link.snippet}</span>
-                    `;
+                    const anchor = document.createElement('a');
+                    anchor.href = link.url;
+                    anchor.target = '_blank';
+                    anchor.className = 'report-link';
+                    anchor.style.cssText = 'font-weight:600; display:block; margin-bottom:3px;';
+                    anchor.textContent = link.title;
+
+                    const snippet = document.createElement('span');
+                    snippet.style.cssText = 'font-size:11px; color:#555; display:block;';
+                    snippet.textContent = link.snippet || '';
+
+                    const saveBtn = document.createElement('button');
+                    saveBtn.className = 'save-source-btn';
+                    saveBtn.textContent = 'Save This Source';
+                    saveBtn.addEventListener('click', () => saveSelectedEvidence(link));
+
+                    item.appendChild(anchor);
+                    item.appendChild(snippet);
+                    item.appendChild(saveBtn);
                     evidenceLinksDiv.appendChild(item);
                 });
 
