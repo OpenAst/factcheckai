@@ -3,8 +3,13 @@ import os
 
 DB_PATH = "cache.db"
 
+
+def _get_connection():
+    return sqlite3.connect(DB_PATH)
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = _get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS claim_cache (
@@ -15,16 +20,30 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS curated_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL UNIQUE,
+            title TEXT,
+            source TEXT,
+            claim_summary TEXT,
+            verdict TEXT,
+            notes TEXT,
+            tags TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
+
 
 class CacheService:
     @staticmethod
     def get_cached_verdict(claim_text: str):
         import hashlib
         claim_hash = hashlib.sha256(claim_text.encode()).hexdigest()
-        
-        conn = sqlite3.connect(DB_PATH)
+
+        conn = _get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT verdict_markdown, evidence_json FROM claim_cache WHERE claim_hash = ?", (claim_hash,))
         result = cursor.fetchone()
@@ -46,7 +65,7 @@ class CacheService:
         claim_hash = hashlib.sha256(claim_text.encode()).hexdigest()
         import json
         evidence_json = json.dumps(evidence_links or [])
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO claim_cache (claim_hash, claim_text, verdict_markdown, evidence_json) VALUES (?, ?, ?, ?)",
@@ -58,7 +77,7 @@ class CacheService:
     @staticmethod
     def list_cache():
         import json
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT claim_text, verdict_markdown, evidence_json, timestamp FROM claim_cache ORDER BY timestamp DESC")
         rows = cursor.fetchall()
@@ -74,5 +93,64 @@ class CacheService:
                 "verdict_markdown": verdict,
                 "evidence_links": evidence,
                 "timestamp": ts
+            })
+        return out
+
+
+class CuratedEvidenceService:
+    @staticmethod
+    def add_entry(url: str, title: str = "", source: str = "", claim_summary: str = "", verdict: str = "", notes: str = "", tags=None):
+        import json
+        conn = _get_connection()
+        cursor = conn.cursor()
+        tags_json = json.dumps(tags or [])
+        cursor.execute(
+            """
+            INSERT INTO curated_evidence (url, title, source, claim_summary, verdict, notes, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                title=excluded.title,
+                source=excluded.source,
+                claim_summary=excluded.claim_summary,
+                verdict=excluded.verdict,
+                notes=excluded.notes,
+                tags=excluded.tags
+            """,
+            (url, title, source, claim_summary, verdict, notes, tags_json),
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def list_entries():
+        import json
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, url, title, source, claim_summary, verdict, notes, tags, created_at
+            FROM curated_evidence
+            ORDER BY created_at DESC, id DESC
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for row in rows:
+            tags = []
+            try:
+                tags = json.loads(row[7]) if row[7] else []
+            except Exception:
+                tags = []
+            out.append({
+                "id": row[0],
+                "url": row[1],
+                "title": row[2] or "",
+                "source": row[3] or "",
+                "claim_summary": row[4] or "",
+                "verdict": row[5] or "",
+                "notes": row[6] or "",
+                "tags": tags,
+                "created_at": row[8],
             })
         return out

@@ -9,9 +9,9 @@ import base64
 import io
 from urllib.parse import urlparse
 try:
-    from duckduckgo_search import ddg
+    from duckduckgo_search import DDGS
 except Exception:
-    ddg = None
+    DDGS = None
 
 try:
     from google.cloud import vision
@@ -26,6 +26,18 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
 RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",") if d.strip()]
+
+PRIORITY_FACTCHECK_DOMAINS = [
+    "politifact.com",
+    "factcheck.org",
+    "apnews.com",
+    "africacheck.org",
+    "leadstories.com",
+    "snopes.com",
+    "fullfact.org",
+    "reuters.com",
+    "afp.com",
+]
 
 # Domains we treat as social media / user-generated content and want to exclude
 SOCIAL_DOMAINS = [
@@ -56,16 +68,41 @@ def _is_preferred_news(link: str) -> bool:
     return any(netloc == d or netloc.endswith('.' + d) for d in RELIABLE_NEWS_DOMAINS)
 
 
+def _domain_matches(netloc: str, domain: str) -> bool:
+    return netloc == domain or netloc.endswith("." + domain)
+
+
+def _source_priority_score(link: str) -> int:
+    netloc = _normalize_netloc(link)
+    if not netloc:
+        return 99
+
+    for idx, domain in enumerate(PRIORITY_FACTCHECK_DOMAINS):
+        if _domain_matches(netloc, domain):
+            return idx
+
+    if RELIABLE_NEWS_DOMAINS:
+        for idx, domain in enumerate(RELIABLE_NEWS_DOMAINS, start=20):
+            if _domain_matches(netloc, domain):
+                return idx
+
+    if netloc.endswith(".gov") or netloc.endswith(".edu"):
+        return 40
+
+    return 80
+
+
 def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dict]:
     # Exclude obvious social/user-generated links
     filtered = [r for r in results if r.get('link') and not _is_social_link(r.get('link'))]
-    # Prefer reliable news domains if provided
-    if RELIABLE_NEWS_DOMAINS:
-        preferred = [r for r in filtered if _is_preferred_news(r.get('link'))]
-        others = [r for r in filtered if not _is_preferred_news(r.get('link'))]
-        ordered = preferred + others
-    else:
-        ordered = filtered
+    ordered = sorted(
+        filtered,
+        key=lambda r: (
+            _source_priority_score(r.get("link", "")),
+            len(r.get("snippet", "")) == 0,
+            len(r.get("title", "")) == 0,
+        ),
+    )
     return ordered[:max_results]
 
 # Groq models (primary - free tier)
@@ -113,14 +150,14 @@ class SerperService:
 class DuckDuckGoService:
     @staticmethod
     def search(query: str, max_results: int = 5) -> List[Dict]:
-        """Use duckduckgo_search.ddg if installed to get organic results.
+        """Use duckduckgo_search if installed to get organic results.
         Returns list of dicts with keys: title, link, snippet
         """
-        if ddg is None:
+        if DDGS is None:
             print('duckduckgo_search not available')
             return []
         try:
-            results = ddg(query, max_results=max_results)
+            results = DDGS().text(query, max_results=max_results)
             out = []
             for r in results:
                 out.append({
@@ -201,7 +238,13 @@ MAIN CLAIM:"""
         claim = result.strip().replace("MAIN CLAIM:", "").strip()
         return claim if claim else text
 
-    def fact_check(self, claim: str, search_results: List[Dict]) -> str:
+    def fact_check(
+        self,
+        claim: str,
+        search_results: List[Dict],
+        original_text: str = "",
+        suspected_author: str = "",
+    ) -> str:
         """Analyze the claim against search results and produce a verdict."""
         context = ""
         for i, res in enumerate(search_results):
@@ -215,19 +258,31 @@ Analyze the following claim using the provided search results.
 CLAIM:
 {claim}
 
+ORIGINAL POST TEXT:
+{original_text or claim}
+
+SUSPECTED AUTHOR:
+{suspected_author or "Unknown / not clearly stated"}
+
 SEARCH RESULTS:
 {context}
 
 YOUR TASK:
-1. Determine the truthfulness of the claim.
-2. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
-3. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
-4. Provide a structured report in Markdown.
+1. First determine whether the post or statement is authentically attributable to the suspected author.
+2. Use reliable news reports, fact-checkers, official records, or direct primary-source reporting for attribution. Do not treat random reposts, social embeds, or unsourced blogs as proof.
+3. If the search results do NOT reliably confirm the author actually made the post, make that the central finding and mark the content as Unverified, False, or Misleading as appropriate.
+4. If the attribution appears supported, then evaluate the truthfulness of the factual claims inside the post.
+5. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
+6. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
+7. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
+8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
+9. Provide a structured report in Markdown.
 
 STRUCTURE:
 - **Verdict**: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
-- **Summary**: (2-3 sentences explaining the core finding)
-- **Key Points**: (Bullet points with supporting facts)
+- **Summary**: (2-3 sentences explaining the core finding, starting with whether the attribution is verified)
+- **Attribution Check**: (State whether reliable reporting confirms the named author really made the post/statement)
+- **Key Points**: (Bullet points with supporting facts, prioritizing direct refuting evidence when the claims are false)
 - **Date Check**: (Explicitly state if the event is current or from the past)
 
 If search results are empty or irrelevant, state "Unverified" and explain why."""
