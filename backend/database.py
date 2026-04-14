@@ -17,6 +17,7 @@ def init_db():
             claim_text TEXT,
             verdict_markdown TEXT,
             evidence_json TEXT,
+            metadata_json TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -33,6 +34,28 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS factcheck_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_hash TEXT NOT NULL UNIQUE,
+            post_text TEXT,
+            extracted_claim TEXT,
+            claim_status TEXT,
+            system_verdict TEXT,
+            verdict_markdown TEXT,
+            selected_evidence_url TEXT,
+            selected_evidence_title TEXT,
+            selected_evidence_snippet TEXT,
+            all_evidence_json TEXT,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("PRAGMA table_info(claim_cache)")
+    existing_claim_cache_columns = {row[1] for row in cursor.fetchall()}
+    if "metadata_json" not in existing_claim_cache_columns:
+        cursor.execute("ALTER TABLE claim_cache ADD COLUMN metadata_json TEXT")
     conn.commit()
     conn.close()
 
@@ -45,31 +68,45 @@ class CacheService:
 
         conn = _get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT verdict_markdown, evidence_json FROM claim_cache WHERE claim_hash = ?", (claim_hash,))
+        cursor.execute(
+            "SELECT verdict_markdown, evidence_json, metadata_json FROM claim_cache WHERE claim_hash = ?",
+            (claim_hash,),
+        )
         result = cursor.fetchone()
         conn.close()
         if not result:
             return None
         verdict = result[0]
         evidence_json = result[1]
+        metadata_json = result[2] if len(result) > 2 else None
         try:
             import json
             evidence = json.loads(evidence_json) if evidence_json else []
         except Exception:
             evidence = []
-        return {"verdict_markdown": verdict, "evidence_links": evidence}
+        try:
+            import json
+            metadata = json.loads(metadata_json) if metadata_json else {}
+        except Exception:
+            metadata = {}
+        return {"verdict_markdown": verdict, "evidence_links": evidence, "metadata": metadata}
 
     @staticmethod
-    def save_to_cache(claim_text: str, verdict_markdown: str, evidence_links=None):
+    def save_to_cache(claim_text: str, verdict_markdown: str, evidence_links=None, metadata=None):
         import hashlib
         claim_hash = hashlib.sha256(claim_text.encode()).hexdigest()
         import json
         evidence_json = json.dumps(evidence_links or [])
+        metadata_json = json.dumps(metadata or {})
         conn = _get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO claim_cache (claim_hash, claim_text, verdict_markdown, evidence_json) VALUES (?, ?, ?, ?)",
-            (claim_hash, claim_text, verdict_markdown, evidence_json)
+            """
+            INSERT OR REPLACE INTO claim_cache
+            (claim_hash, claim_text, verdict_markdown, evidence_json, metadata_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (claim_hash, claim_text, verdict_markdown, evidence_json, metadata_json)
         )
         conn.commit()
         conn.close()
@@ -79,19 +116,30 @@ class CacheService:
         import json
         conn = _get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT claim_text, verdict_markdown, evidence_json, timestamp FROM claim_cache ORDER BY timestamp DESC")
+        cursor.execute(
+            """
+            SELECT claim_text, verdict_markdown, evidence_json, metadata_json, timestamp
+            FROM claim_cache
+            ORDER BY timestamp DESC
+            """
+        )
         rows = cursor.fetchall()
         conn.close()
         out = []
-        for claim_text, verdict, evidence_json, ts in rows:
+        for claim_text, verdict, evidence_json, metadata_json, ts in rows:
             try:
                 evidence = json.loads(evidence_json) if evidence_json else []
             except Exception:
                 evidence = []
+            try:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+            except Exception:
+                metadata = {}
             out.append({
                 "claim_text": claim_text,
                 "verdict_markdown": verdict,
                 "evidence_links": evidence,
+                "metadata": metadata,
                 "timestamp": ts
             })
         return out
@@ -154,3 +202,64 @@ class CuratedEvidenceService:
                 "created_at": row[8],
             })
         return out
+
+
+class ReviewService:
+    @staticmethod
+    def save_review(
+        post_text: str,
+        extracted_claim: str = "",
+        claim_status: str = "",
+        system_verdict: str = "",
+        verdict_markdown: str = "",
+        selected_evidence_url: str = "",
+        selected_evidence_title: str = "",
+        selected_evidence_snippet: str = "",
+        all_evidence=None,
+        notes: str = "",
+    ):
+        import hashlib
+        import json
+
+        post_hash = hashlib.sha256((post_text or "").encode()).hexdigest()
+        all_evidence_json = json.dumps(all_evidence or [])
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO factcheck_reviews (
+                post_hash, post_text, extracted_claim, claim_status, system_verdict,
+                verdict_markdown, selected_evidence_url, selected_evidence_title,
+                selected_evidence_snippet, all_evidence_json, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_hash) DO UPDATE SET
+                post_text=excluded.post_text,
+                extracted_claim=excluded.extracted_claim,
+                claim_status=excluded.claim_status,
+                system_verdict=excluded.system_verdict,
+                verdict_markdown=excluded.verdict_markdown,
+                selected_evidence_url=excluded.selected_evidence_url,
+                selected_evidence_title=excluded.selected_evidence_title,
+                selected_evidence_snippet=excluded.selected_evidence_snippet,
+                all_evidence_json=excluded.all_evidence_json,
+                notes=excluded.notes,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                post_hash,
+                post_text,
+                extracted_claim,
+                claim_status,
+                system_verdict,
+                verdict_markdown,
+                selected_evidence_url,
+                selected_evidence_title,
+                selected_evidence_snippet,
+                all_evidence_json,
+                notes,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return post_hash

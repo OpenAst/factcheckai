@@ -7,6 +7,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 import base64
 import io
+import json
 from urllib.parse import urlparse
 try:
     from duckduckgo_search import DDGS
@@ -15,8 +16,10 @@ except Exception:
 
 try:
     from google.cloud import vision
+    from google.oauth2 import service_account
 except Exception:
     vision = None
+    service_account = None
 
 load_dotenv()
 
@@ -29,6 +32,7 @@ RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOM
 
 PRIORITY_FACTCHECK_DOMAINS = [
     "politifact.com",
+    "reuters.com",
     "factcheck.org",
     "apnews.com",
     "africacheck.org",
@@ -42,7 +46,8 @@ PRIORITY_FACTCHECK_DOMAINS = [
 # Domains we treat as social media / user-generated content and want to exclude
 SOCIAL_DOMAINS = [
     'twitter.com', 't.co', 'facebook.com', 'instagram.com', 'reddit.com',
-    'youtube.com', 'youtu.be', 'linkedin.com', 'tiktok.com', 'snapchat.com'
+    'youtube.com', 'youtu.be', 'linkedin.com', 'tiktok.com', 'snapchat.com', 
+    'threads.com', 'x.com'
 ]
 
 
@@ -238,6 +243,48 @@ MAIN CLAIM:"""
         claim = result.strip().replace("MAIN CLAIM:", "").strip()
         return claim if claim else text
 
+    def classify_claimability(self, text: str) -> Dict[str, str]:
+        """Classify whether text contains a fact-checkable claim."""
+        prompt = f"""You are helping a fact-checking workflow.
+Decide whether the text contains a clear verifiable factual claim.
+
+Rules:
+- Use NO_CLAIM when the text is mainly opinion, insult, praise, emotion, advice, satire, vague rhetoric, or personal preference.
+- Use FACTUAL_CLAIM when the text contains a specific claim that can be checked against evidence.
+- Use MIXED when the text mixes opinion with at least one checkable factual claim.
+- If MIXED, extract only the strongest checkable factual claim.
+- If NO_CLAIM, leave the claim blank.
+
+Return exactly in this format:
+STATUS: <NO_CLAIM or FACTUAL_CLAIM or MIXED>
+CLAIM: <short extracted claim or blank>
+REASON: <one short sentence>
+
+TEXT:
+{text}
+"""
+        result = self._call_model(prompt)
+        status = "FACTUAL_CLAIM"
+        claim = ""
+        reason = ""
+        for line in (result or "").splitlines():
+            if line.startswith("STATUS:"):
+                status = line.split(":", 1)[1].strip().upper() or status
+            elif line.startswith("CLAIM:"):
+                claim = line.split(":", 1)[1].strip()
+            elif line.startswith("REASON:"):
+                reason = line.split(":", 1)[1].strip()
+
+        if status not in {"NO_CLAIM", "FACTUAL_CLAIM", "MIXED"}:
+            status = "FACTUAL_CLAIM"
+        if status == "NO_CLAIM":
+            claim = ""
+        return {
+            "status": status.lower(),
+            "claim": claim,
+            "reason": reason or "The model did not provide a reason.",
+        }
+
     def fact_check(
         self,
         claim: str,
@@ -296,10 +343,36 @@ class VisionService:
     """
     @staticmethod
     def _vision_credentials_available() -> bool:
+        credentials_json = os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")
+        if credentials_json:
+            return True
         credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         if not credentials_path:
             return False
         return os.path.isfile(credentials_path)
+
+    @staticmethod
+    def _vision_client():
+        if vision is None:
+            return None
+
+        credentials_json = os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")
+        if credentials_json and service_account is not None:
+            try:
+                info = json.loads(credentials_json)
+                credentials = service_account.Credentials.from_service_account_info(info)
+                return vision.ImageAnnotatorClient(credentials=credentials)
+            except Exception as e:
+                print('Failed to initialize Google Vision from GOOGLE_VISION_CREDENTIALS_JSON:', e)
+
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if credentials_path and os.path.isfile(credentials_path):
+            try:
+                return vision.ImageAnnotatorClient()
+            except Exception as e:
+                print('Failed to initialize Google Vision from GOOGLE_APPLICATION_CREDENTIALS:', e)
+
+        return None
 
     @staticmethod
     def _ocr_with_gemini(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
@@ -324,50 +397,96 @@ class VisionService:
             return {'text': '', 'web_entities': []}
 
     @staticmethod
+    def _preprocess_image_bytes(image_bytes: bytes) -> List[bytes]:
+        """Generate a few OCR-friendly variants for screenshot text."""
+        try:
+            from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+        except Exception:
+            return [image_bytes]
+
+        variants: List[bytes] = [image_bytes]
+        try:
+            original = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+            boosted = original.resize(
+                (max(1, original.width * 2), max(1, original.height * 2)),
+                Image.Resampling.LANCZOS,
+            )
+            gray = ImageOps.grayscale(boosted)
+            contrast = ImageEnhance.Contrast(gray).enhance(1.8)
+            sharpened = contrast.filter(ImageFilter.SHARPEN)
+            thresholded = sharpened.point(lambda px: 255 if px > 165 else 0)
+
+            for img in (boosted, sharpened, thresholded):
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                variants.append(buf.getvalue())
+        except Exception as e:
+            print('Image preprocessing failed:', e)
+
+        return variants
+
+    @staticmethod
     def ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
+        prepared_images = VisionService._preprocess_image_bytes(image_bytes)
+
         # Prefer Google Cloud Vision if available and configured
         if vision is not None and VisionService._vision_credentials_available():
             try:
-                client = vision.ImageAnnotatorClient()
-                image = vision.Image(content=image_bytes)
-                # Use DOCUMENT_TEXT_DETECTION for denser text (good for overlaid text)
-                resp = client.document_text_detection(image=image)
-                text = ''
-                try:
-                    text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
-                except Exception:
+                client = VisionService._vision_client()
+                if client is None:
+                    raise Exception("Google Vision client could not be initialized")
+                best_result = {'text': '', 'web_entities': []}
+                for candidate in prepared_images:
+                    image = vision.Image(content=candidate)
+                    resp = client.document_text_detection(image=image)
                     text = ''
+                    try:
+                        text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
+                    except Exception:
+                        text = ''
 
-                # web detection (optional) to find similar pages and context
-                web_entities = []
-                try:
-                    web = client.web_detection(image=image).web_detection
-                    if web and web.web_entities:
-                        for e in web.web_entities[:5]:
-                            web_entities.append({
-                                'description': e.description,
-                                'score': getattr(e, 'score', None)
-                            })
-                except Exception:
                     web_entities = []
+                    try:
+                        web = client.web_detection(image=image).web_detection
+                        if web and web.web_entities:
+                            for e in web.web_entities[:5]:
+                                web_entities.append({
+                                    'description': e.description,
+                                    'score': getattr(e, 'score', None)
+                                })
+                    except Exception:
+                        web_entities = []
 
-                return {'text': text or '', 'web_entities': web_entities}
+                    if len((text or "").strip()) > len(best_result.get('text', '').strip()):
+                        best_result = {'text': text or '', 'web_entities': web_entities}
+
+                if best_result.get('text'):
+                    return best_result
             except Exception as e:
                 print('Google Vision failed:', e)
-        elif vision is not None and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-            print('Skipping Google Vision: GOOGLE_APPLICATION_CREDENTIALS does not point to a valid file')
+        elif vision is not None and (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")):
+            print('Skipping Google Vision: credentials were provided but could not be used')
 
-        gemini_result = VisionService._ocr_with_gemini(image_bytes, mime_type=mime_type)
-        if gemini_result.get('text'):
-            return gemini_result
+        best_gemini = {'text': '', 'web_entities': []}
+        for candidate in prepared_images:
+            gemini_result = VisionService._ocr_with_gemini(candidate, mime_type="image/png")
+            if len((gemini_result.get('text') or '').strip()) > len(best_gemini.get('text', '').strip()):
+                best_gemini = gemini_result
+        if best_gemini.get('text'):
+            return best_gemini
 
         # Fallback: try local OCR with pytesseract if google vision not available
         try:
             from PIL import Image
             import pytesseract
-            img = Image.open(io.BytesIO(image_bytes))
-            text = pytesseract.image_to_string(img)
-            return {'text': text or '', 'web_entities': []}
+            best_text = ""
+            for candidate in prepared_images:
+                img = Image.open(io.BytesIO(candidate))
+                text = pytesseract.image_to_string(img)
+                if len((text or "").strip()) > len(best_text.strip()):
+                    best_text = text or ""
+            return {'text': best_text or '', 'web_entities': []}
         except Exception as e:
             print('Pytesseract OCR fallback failed:', e)
             raise Exception('No OCR available: install google-cloud-vision with credentials or pytesseract + pillow')

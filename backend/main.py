@@ -9,10 +9,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
     from .services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
-    from .database import init_db, CacheService, CuratedEvidenceService
+    from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
 except ImportError:
     from services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
-    from database import init_db, CacheService, CuratedEvidenceService
+    from database import init_db, CacheService, CuratedEvidenceService, ReviewService
 
 load_dotenv()
 
@@ -47,6 +47,8 @@ class FactCheckResponse(BaseModel):
     extracted_claim: str = ""
     evidence_links: List[EvidenceLink] = []
     is_cached: bool = False
+    claim_status: str = "factual_claim"
+    claim_reason: str = ""
 
 
 class CuratedEvidenceRequest(BaseModel):
@@ -57,6 +59,18 @@ class CuratedEvidenceRequest(BaseModel):
     verdict: str = ""
     notes: str = ""
     tags: List[str] = []
+
+
+class ReviewSelectionRequest(BaseModel):
+    post_text: str
+    extracted_claim: str = ""
+    claim_status: str = ""
+    verdict_md: str = ""
+    selected_evidence_url: str
+    selected_evidence_title: str = ""
+    selected_evidence_snippet: str = ""
+    evidence_links: List[EvidenceLink] = []
+    notes: str = ""
 
 gemini_service = GeminiService()
 
@@ -185,6 +199,13 @@ def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8)
                 return merged
     return merged
 
+
+def _extract_verdict_label(verdict_md: str) -> str:
+    match = re.search(r"\*\*Verdict\*\*:\s*([A-Za-z ]+)", verdict_md or "", flags=re.IGNORECASE)
+    if match:
+        return _normalize_space(match.group(1))
+    return ""
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -231,6 +252,44 @@ def admin_add_evidence(payload: CuratedEvidenceRequest, x_admin_token: Optional[
         tags=[tag.strip() for tag in payload.tags if tag.strip()],
     )
     return {"status": "ok", "message": "Evidence saved"}
+
+
+@app.post('/reviews')
+def save_review(payload: ReviewSelectionRequest):
+    if not payload.post_text.strip():
+        raise HTTPException(status_code=400, detail="post_text is required")
+    if not payload.selected_evidence_url.strip():
+        raise HTTPException(status_code=400, detail="selected_evidence_url is required")
+
+    evidence_links = [
+        {"title": item.title, "url": item.url, "snippet": item.snippet}
+        for item in payload.evidence_links
+    ]
+    system_verdict = _extract_verdict_label(payload.verdict_md)
+
+    ReviewService.save_review(
+        post_text=payload.post_text.strip(),
+        extracted_claim=payload.extracted_claim.strip(),
+        claim_status=payload.claim_status.strip(),
+        system_verdict=system_verdict,
+        verdict_markdown=payload.verdict_md.strip(),
+        selected_evidence_url=payload.selected_evidence_url.strip(),
+        selected_evidence_title=payload.selected_evidence_title.strip(),
+        selected_evidence_snippet=payload.selected_evidence_snippet.strip(),
+        all_evidence=evidence_links,
+        notes=payload.notes.strip(),
+    )
+
+    CuratedEvidenceService.add_entry(
+        url=payload.selected_evidence_url.strip(),
+        title=payload.selected_evidence_title.strip(),
+        source="Rater selected evidence",
+        claim_summary=payload.extracted_claim.strip(),
+        verdict=system_verdict,
+        notes=payload.notes.strip() or payload.post_text.strip()[:500],
+        tags=[tag for tag in [payload.claim_status.strip(), "rater-selected"] if tag],
+    )
+    return {"status": "ok", "message": "Review saved"}
 
 
 @app.get("/admin/ui", response_class=HTMLResponse)
@@ -558,16 +617,58 @@ async def perform_fact_check(request: FactCheckRequest):
         # Return cached verdict and evidence links when available
         verdict_md = cached_result.get("verdict_markdown")
         evidence_links_cached = cached_result.get("evidence_links", [])
+        metadata = cached_result.get("metadata", {})
         # Filter cached evidence to exclude social/user-generated links, then map
         filtered_cached = [e for e in (evidence_links_cached or []) if e.get('url') and not _is_social_link(e.get('url'))]
         evidence_links_resp = [
             EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
             for e in filtered_cached
         ]
-        return FactCheckResponse(verdict_md=verdict_md, extracted_claim="", evidence_links=evidence_links_resp, is_cached=True)
+        return FactCheckResponse(
+            verdict_md=verdict_md,
+            extracted_claim=metadata.get("extracted_claim", ""),
+            evidence_links=evidence_links_resp,
+            is_cached=True,
+            claim_status=metadata.get("claim_status", "factual_claim"),
+            claim_reason=metadata.get("claim_reason", ""),
+        )
 
-    # 1. Extract the main claim from the text
-    extracted_claim = gemini_service.extract_claim(request.text)
+    # 1. Decide whether the text contains a fact-checkable claim.
+    claimability = gemini_service.classify_claimability(request.text)
+    claim_status = claimability.get("status", "factual_claim")
+    claim_reason = claimability.get("reason", "")
+
+    if claim_status == "no_claim":
+        result_md = (
+            "**Verdict**: No Claim\n\n"
+            f"**Summary**: {claim_reason or 'This post does not contain a specific factual claim that needs fact-checking.'}\n\n"
+            "**Key Points**:\n"
+            "- The content is mainly opinion, commentary, rhetoric, or personal expression.\n"
+            "- There is no single concrete factual assertion to verify against news or primary evidence.\n"
+            "- No web fact-check search was run because this item is not a checkable claim.\n\n"
+            "**Date Check**: Not applicable."
+        )
+        CacheService.save_to_cache(
+            request.text,
+            result_md,
+            [],
+            metadata={
+                "extracted_claim": "",
+                "claim_status": claim_status,
+                "claim_reason": claim_reason,
+            },
+        )
+        return FactCheckResponse(
+            verdict_md=result_md,
+            extracted_claim="",
+            evidence_links=[],
+            is_cached=False,
+            claim_status=claim_status,
+            claim_reason=claim_reason,
+        )
+
+    # 2. Extract the main claim from the text
+    extracted_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
     print(f"Extracted claim: {extracted_claim}")
 
     # If the claim appears to describe a money giveaway / too-good-to-be-true ad,
@@ -595,7 +696,7 @@ async def perform_fact_check(request: FactCheckRequest):
 
     suspected_author = _extract_suspected_author(request.text)
 
-    # 2. Search for information using attribution-first queries when the text looks
+    # 3. Search for information using attribution-first queries when the text looks
     # like a quoted social post. Bias toward direct claim checks and wire coverage.
     search_queries = _build_search_queries(request.text, extracted_claim)
 
@@ -620,7 +721,7 @@ async def perform_fact_check(request: FactCheckRequest):
         fallback_results = [SerperService.search(query) for query in search_queries]
         search_results = _merge_search_results(fallback_results, max_results=10)
 
-    # 2b. Filter search results to prefer credible sources and exclude social media/unofficial sites
+    # 3b. Filter search results to prefer credible sources and exclude social media/unofficial sites
     def _filter_credible(results, category: Optional[str] = None):
         import urllib.parse
         # Blacklist known social and unofficial domains
@@ -705,7 +806,7 @@ async def perform_fact_check(request: FactCheckRequest):
     # Use filtered results for evidence links and fact-checking
     search_results = filtered_results
 
-    # 3. Analyze with Gemini
+    # 4. Analyze with Gemini
     result_md = gemini_service.fact_check(
         extracted_claim,
         search_results,
@@ -713,7 +814,7 @@ async def perform_fact_check(request: FactCheckRequest):
         suspected_author=suspected_author,
     )
 
-    # 4. Format evidence links (defensive: exclude any social/user-generated links)
+    # 5. Format evidence links (defensive: exclude any social/user-generated links)
     safe_results = [r for r in search_results if r.get('link') and not _is_social_link(r.get('link'))]
     evidence_links = [
         EvidenceLink(
@@ -729,15 +830,26 @@ async def perform_fact_check(request: FactCheckRequest):
         {"title": e.title, "url": e.url, "snippet": e.snippet} for e in evidence_links
     ]
 
-    # 5. Save to cache if successful (include evidence links)
+    # 6. Save to cache if successful (include evidence links)
     if "Fact-checking error" not in result_md and "AI error" not in result_md:
-        CacheService.save_to_cache(request.text, result_md, evidence_links_for_cache)
+        CacheService.save_to_cache(
+            request.text,
+            result_md,
+            evidence_links_for_cache,
+            metadata={
+                "extracted_claim": extracted_claim,
+                "claim_status": claim_status,
+                "claim_reason": claim_reason,
+            },
+        )
 
     return FactCheckResponse(
         verdict_md=result_md,
         extracted_claim=extracted_claim,
         evidence_links=evidence_links,
-        is_cached=False
+        is_cached=False,
+        claim_status=claim_status,
+        claim_reason=claim_reason,
     )
 
 
@@ -750,13 +862,17 @@ async def ocr_images(req: OcrRequest):
     if not req.images:
         raise HTTPException(status_code=400, detail="No images provided")
     aggregated = []
+    web_entities = []
     try:
         for data_url in req.images:
             res = VisionService.ocr_data_url(data_url)
             text = res.get('text', '')
             aggregated.append(text or '')
+            for entity in res.get('web_entities', []) or []:
+                if entity not in web_entities:
+                    web_entities.append(entity)
         combined = '\n\n'.join([t for t in aggregated if t])
-        return {"texts": aggregated, "combined": combined}
+        return {"texts": aggregated, "combined": combined, "web_entities": web_entities[:10]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OCR error: {e}")
 
