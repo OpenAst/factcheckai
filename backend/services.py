@@ -1,13 +1,10 @@
 import os
 import requests
 from google import genai
-from google.genai import types
-from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
 import base64
 import io
-import json
 from urllib.parse import urlparse
 try:
     from duckduckgo_search import DDGS
@@ -15,17 +12,14 @@ except Exception:
     DDGS = None
 
 try:
-    from google.cloud import vision
-    from google.oauth2 import service_account
+    import easyocr
 except Exception:
-    vision = None
-    service_account = None
+    easyocr = None
 
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
 RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",") if d.strip()]
@@ -110,14 +104,7 @@ def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dic
     )
     return ordered[:max_results]
 
-# Groq models (primary - free tier)
-GROQ_MODELS = [
-    "llama-3.3-70b-versatile",   # Best quality free model
-    "llama-3.1-8b-instant",      # Fast fallback
-    "mixtral-8x7b-32768",        # Alternative fallback
-]
-
-# Gemini models (secondary fallback if Groq fails)
+# Gemini models
 GEMINI_MODELS = [
     "gemini-2.0-flash-001",
     "gemini-2.0-flash",
@@ -177,31 +164,10 @@ class DuckDuckGoService:
 
 class GeminiService:
     def __init__(self):
-        self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
         self.gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-    def _call_groq(self, prompt: str) -> str:
-        """Try Groq models (free, fast)."""
-        if not self.groq_client:
-            raise Exception("No GROQ_API_KEY set")
-        last_error = None
-        for model in GROQ_MODELS:
-            try:
-                print(f"Trying Groq model: {model}")
-                response = self.groq_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1024,
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                last_error = str(e)
-                print(f"Groq model {model} failed: {last_error}")
-                continue
-        raise Exception(f"All Groq models failed: {last_error}")
-
     def _call_gemini(self, prompt: str) -> str:
-        """Try Gemini models as fallback."""
+        """Try Gemini models."""
         if not self.gemini_client:
             raise Exception("No GEMINI_API_KEY set")
         last_error = None
@@ -220,19 +186,22 @@ class GeminiService:
         raise Exception(f"All Gemini models failed: {last_error}")
 
     def _call_model(self, prompt: str) -> str:
-        """Try Groq first, then Gemini as fallback."""
+        """Use Gemini only."""
         try:
-            return self._call_groq(prompt)
-        except Exception as groq_err:
-            print(f"Groq failed, trying Gemini: {groq_err}")
-            try:
-                return self._call_gemini(prompt)
-            except Exception as gemini_err:
-                return f"AI error (all providers failed): Groq: {groq_err} | Gemini: {gemini_err}"
+            return self._call_gemini(prompt)
+        except Exception as gemini_err:
+            return f"AI error (Gemini failed): {gemini_err}"
 
     def extract_claim(self, text: str) -> str:
         """Use AI to isolate the single main factual claim from the text."""
-        prompt = f"""You are a fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
+        prompt = f"""You are a senior fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
+
+Rules:
+- Prefer the most consequential and specific factual assertion, not a vague topic summary.
+- Do NOT just restate who posted the content unless authorship itself is the main checkable claim.
+- If the text contains several factual statements, choose the one that would matter most to verify for misinformation review.
+- Keep concrete names, places, dates, numbers, actions, and outcomes when present.
+
 Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
 
 TEXT:
@@ -243,6 +212,39 @@ MAIN CLAIM:"""
         claim = result.strip().replace("MAIN CLAIM:", "").strip()
         return claim if claim else text
 
+    def extract_claims(self, text: str, max_claims: int = 3) -> List[str]:
+        """Extract up to three fact-checkable claims, ordered by importance."""
+        prompt = f"""You are a senior fact-checking assistant.
+From the text below, extract up to {max_claims} distinct VERIFIABLE FACTUAL CLAIMS.
+
+Rules:
+- Return 2 claims when there are clearly 2 meaningful factual claims.
+- Return 3 claims only when there are 3 genuinely distinct and important checkable claims.
+- Prefer consequential, specific claims over vague summaries.
+- Do NOT include opinion, rhetoric, or pure attribution unless authorship itself is a factual claim.
+- Keep each claim short, concrete, and standalone.
+- If there is only 1 real factual claim, return just 1.
+- If there is no factual claim, return NO_CLAIM.
+
+Return exactly in this format:
+CLAIM: <claim 1>
+CLAIM: <claim 2>
+CLAIM: <claim 3>
+
+TEXT:
+{text}
+"""
+        result = self._call_model(prompt)
+        claims = []
+        for line in (result or "").splitlines():
+            if line.strip().upper() == "NO_CLAIM":
+                return []
+            if line.startswith("CLAIM:"):
+                claim = line.split(":", 1)[1].strip()
+                if claim and claim not in claims:
+                    claims.append(claim)
+        return claims[:max_claims]
+
     def classify_claimability(self, text: str) -> Dict[str, str]:
         """Classify whether text contains a fact-checkable claim."""
         prompt = f"""You are helping a fact-checking workflow.
@@ -252,7 +254,9 @@ Rules:
 - Use NO_CLAIM when the text is mainly opinion, insult, praise, emotion, advice, satire, vague rhetoric, or personal preference.
 - Use FACTUAL_CLAIM when the text contains a specific claim that can be checked against evidence.
 - Use MIXED when the text mixes opinion with at least one checkable factual claim.
-- If MIXED, extract only the strongest checkable factual claim.
+- If MIXED, extract only the strongest and most consequential checkable factual claim.
+- Prefer the deepest factual assertion, not a surface-level paraphrase.
+- Do NOT select mere authorship or attribution as the claim unless the post is fundamentally about whether a named person made a statement.
 - If NO_CLAIM, leave the claim blank.
 
 Return exactly in this format:
@@ -291,6 +295,7 @@ TEXT:
         search_results: List[Dict],
         original_text: str = "",
         suspected_author: str = "",
+        prioritize_authorship: bool = False,
     ) -> str:
         """Analyze the claim against search results and produce a verdict."""
         context = ""
@@ -298,6 +303,27 @@ TEXT:
             context += f"Source {i+1}: {res.get('title')}\n"
             context += f"Snippet: {res.get('snippet')}\n"
             context += f"Link: {res.get('link')}\n\n"
+
+        task_steps = """1. Determine the truthfulness of the main factual claim.
+2. If this appears to be an attributed post, separately assess whether reliable reporting confirms the named author actually made the post or statement.
+3. Do not let attribution distract from the main factual claim unless attribution itself is the main thing being checked.
+4. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
+5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
+6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
+7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
+8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
+9. Provide a structured report in Markdown."""
+
+        if prioritize_authorship:
+            task_steps = """1. Determine the truthfulness of the main factual claim.
+2. Because this appears to be an attributed social post, also check whether reliable reporting confirms the named author actually made the post or statement.
+3. If attribution is unsupported, clearly say that, but still evaluate the substance of the factual claim when the sources allow it.
+4. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
+5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
+6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
+7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
+8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
+9. Provide a structured report in Markdown."""
 
         prompt = f"""You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
 Analyze the following claim using the provided search results.
@@ -315,20 +341,12 @@ SEARCH RESULTS:
 {context}
 
 YOUR TASK:
-1. First determine whether the post or statement is authentically attributable to the suspected author.
-2. Use reliable news reports, fact-checkers, official records, or direct primary-source reporting for attribution. Do not treat random reposts, social embeds, or unsourced blogs as proof.
-3. If the search results do NOT reliably confirm the author actually made the post, make that the central finding and mark the content as Unverified, False, or Misleading as appropriate.
-4. If the attribution appears supported, then evaluate the truthfulness of the factual claims inside the post.
-5. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
-6. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
-7. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
-8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
-9. Provide a structured report in Markdown.
+{task_steps}
 
 STRUCTURE:
 - **Verdict**: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
-- **Summary**: (2-3 sentences explaining the core finding, starting with whether the attribution is verified)
-- **Attribution Check**: (State whether reliable reporting confirms the named author really made the post/statement)
+- **Summary**: (2-3 sentences explaining the core finding, starting with the main factual finding)
+- **Attribution Check**: (Only mention this if attribution is actually relevant to the case)
 - **Key Points**: (Bullet points with supporting facts, prioritizing direct refuting evidence when the claims are false)
 - **Date Check**: (Explicitly state if the event is current or from the past)
 
@@ -337,64 +355,13 @@ If search results are empty or irrelevant, state "Unverified" and explain why.""
 
 
 class VisionService:
-    """Simple wrapper around Google Cloud Vision for OCR and basic web detection.
-    Requires the `google-cloud-vision` package and credentials set via
-    `GOOGLE_APPLICATION_CREDENTIALS` or default application credentials.
-    """
-    @staticmethod
-    def _vision_credentials_available() -> bool:
-        credentials_json = os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")
-        if credentials_json:
-            return True
-        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if not credentials_path:
-            return False
-        return os.path.isfile(credentials_path)
+    """OCR helper built around EasyOCR."""
 
     @staticmethod
-    def _vision_client():
-        if vision is None:
-            return None
+    def _log(message: str):
+        print(f"[VisionService] {message}")
 
-        credentials_json = os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")
-        if credentials_json and service_account is not None:
-            try:
-                info = json.loads(credentials_json)
-                credentials = service_account.Credentials.from_service_account_info(info)
-                return vision.ImageAnnotatorClient(credentials=credentials)
-            except Exception as e:
-                print('Failed to initialize Google Vision from GOOGLE_VISION_CREDENTIALS_JSON:', e)
-
-        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if credentials_path and os.path.isfile(credentials_path):
-            try:
-                return vision.ImageAnnotatorClient()
-            except Exception as e:
-                print('Failed to initialize Google Vision from GOOGLE_APPLICATION_CREDENTIALS:', e)
-
-        return None
-
-    @staticmethod
-    def _ocr_with_gemini(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
-        if not GEMINI_API_KEY:
-            return {'text': '', 'web_entities': []}
-
-        try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[
-                    "Extract all readable text from this image, especially overlaid post text. "
-                    "Return only the detected text, preserving line breaks as much as possible. "
-                    "If no readable text is visible, return an empty response.",
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-            )
-            text = (getattr(response, "text", "") or "").strip()
-            return {'text': text, 'web_entities': []}
-        except Exception as e:
-            print('Gemini OCR fallback failed:', e)
-            return {'text': '', 'web_entities': []}
+    _easyocr_reader = None
 
     @staticmethod
     def _preprocess_image_bytes(image_bytes: bytes) -> List[bytes]:
@@ -422,74 +389,70 @@ class VisionService:
                 img.save(buf, format="PNG")
                 variants.append(buf.getvalue())
         except Exception as e:
-            print('Image preprocessing failed:', e)
+            VisionService._log(f"Image preprocessing failed: {e}")
 
         return variants
 
     @staticmethod
-    def ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
-        prepared_images = VisionService._preprocess_image_bytes(image_bytes)
+    def _get_easyocr_reader():
+        if easyocr is None:
+            message = "EasyOCR package is unavailable. Install easyocr, torch, and torchvision."
+            VisionService._log(message)
+            raise RuntimeError(message)
+        if VisionService._easyocr_reader is not None:
+            return VisionService._easyocr_reader
 
-        # Prefer Google Cloud Vision if available and configured
-        if vision is not None and VisionService._vision_credentials_available():
-            try:
-                client = VisionService._vision_client()
-                if client is None:
-                    raise Exception("Google Vision client could not be initialized")
-                best_result = {'text': '', 'web_entities': []}
-                for candidate in prepared_images:
-                    image = vision.Image(content=candidate)
-                    resp = client.document_text_detection(image=image)
-                    text = ''
-                    try:
-                        text = resp.full_text_annotation.text if resp.full_text_annotation and resp.full_text_annotation.text else ''
-                    except Exception:
-                        text = ''
+        try:
+            languages_raw = os.getenv("EASYOCR_LANGS", "en")
+            languages = [lang.strip() for lang in languages_raw.split(",") if lang.strip()]
+            VisionService._log(f"Initializing EasyOCR with langs={languages}")
+            VisionService._easyocr_reader = easyocr.Reader(languages, gpu=False)
+            return VisionService._easyocr_reader
+        except Exception as e:
+            message = f"Failed to initialize EasyOCR: {e}"
+            VisionService._log(message)
+            raise RuntimeError(message)
 
-                    web_entities = []
-                    try:
-                        web = client.web_detection(image=image).web_detection
-                        if web and web.web_entities:
-                            for e in web.web_entities[:5]:
-                                web_entities.append({
-                                    'description': e.description,
-                                    'score': getattr(e, 'score', None)
-                                })
-                    except Exception:
-                        web_entities = []
+    @staticmethod
+    def _ocr_with_easyocr(image_bytes: bytes) -> Dict:
+        reader = VisionService._get_easyocr_reader()
 
-                    if len((text or "").strip()) > len(best_result.get('text', '').strip()):
-                        best_result = {'text': text or '', 'web_entities': web_entities}
-
-                if best_result.get('text'):
-                    return best_result
-            except Exception as e:
-                print('Google Vision failed:', e)
-        elif vision is not None and (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GOOGLE_VISION_CREDENTIALS_JSON")):
-            print('Skipping Google Vision: credentials were provided but could not be used')
-
-        best_gemini = {'text': '', 'web_entities': []}
-        for candidate in prepared_images:
-            gemini_result = VisionService._ocr_with_gemini(candidate, mime_type="image/png")
-            if len((gemini_result.get('text') or '').strip()) > len(best_gemini.get('text', '').strip()):
-                best_gemini = gemini_result
-        if best_gemini.get('text'):
-            return best_gemini
-
-        # Fallback: try local OCR with pytesseract if google vision not available
         try:
             from PIL import Image
-            import pytesseract
-            best_text = ""
-            for candidate in prepared_images:
-                img = Image.open(io.BytesIO(candidate))
-                text = pytesseract.image_to_string(img)
-                if len((text or "").strip()) > len(best_text.strip()):
-                    best_text = text or ""
-            return {'text': best_text or '', 'web_entities': []}
+            import numpy as np
+
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            result = reader.readtext(np.array(image), detail=0, paragraph=False)
+            lines = [(item or "").strip() for item in (result or []) if (item or "").strip()]
+
+            combined = "\n".join(lines).strip()
+            VisionService._log(f"EasyOCR returned {len(combined)} characters")
+            return {'text': combined, 'web_entities': []}
         except Exception as e:
-            print('Pytesseract OCR fallback failed:', e)
-            raise Exception('No OCR available: install google-cloud-vision with credentials or pytesseract + pillow')
+            VisionService._log(f"EasyOCR failed: {e}")
+            return {'text': '', 'web_entities': []}
+
+    @staticmethod
+    def ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
+        prepared_images = VisionService._preprocess_image_bytes(image_bytes)
+        VisionService._log(
+            f"OCR request received: original_bytes={len(image_bytes)} mime_type={mime_type} prepared_variants={len(prepared_images)}"
+        )
+
+        best_easyocr = {'text': '', 'web_entities': []}
+        for idx, candidate in enumerate(prepared_images, start=1):
+            VisionService._log(f"Trying EasyOCR variant {idx}/{len(prepared_images)}")
+            easyocr_result = VisionService._ocr_with_easyocr(candidate)
+            if len((easyocr_result.get('text') or '').strip()) > len(best_easyocr.get('text', '').strip()):
+                best_easyocr = easyocr_result
+        if best_easyocr.get('text'):
+            VisionService._log(
+                f"EasyOCR selected best result with text_chars={len(best_easyocr.get('text', '').strip())}"
+            )
+            return best_easyocr
+        VisionService._log("EasyOCR returned no readable text")
+        VisionService._log("All OCR providers returned no readable text")
+        return {'text': '', 'web_entities': []}
 
     @staticmethod
     def ocr_data_url(data_url: str) -> Dict:
@@ -502,7 +465,10 @@ class VisionService:
             if header.startswith("data:") and ";" in header:
                 mime_type = header[5:].split(";", 1)[0] or mime_type
             image_bytes = base64.b64decode(b64)
+            VisionService._log(f"Decoded data URL to {len(image_bytes)} bytes ({mime_type})")
             return VisionService.ocr_image_bytes(image_bytes, mime_type=mime_type)
+        except RuntimeError:
+            raise
         except Exception as e:
-            print('VisionService ocr_data_url error:', e)
+            VisionService._log(f"ocr_data_url error: {e}")
             return {'text': '', 'web_entities': []}

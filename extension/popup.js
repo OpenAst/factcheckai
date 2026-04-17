@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let extractedText = "";
     let currentFactCheckData = null;
+    let currentSelectedClaim = "";
 
     function setMiniStatus(message, isError = false) {
         saveReviewStatus.style.display = 'block';
@@ -57,6 +58,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function tryExtract() {
         detectedTextDiv.value = "Detecting content...";
         checkBtn.disabled = true;
+        currentSelectedClaim = "";
 
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -153,6 +155,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                 }
 
+                const rankedImages = images
+                    .filter(img => img.rect && img.rect.width > 20 && img.rect.height > 20)
+                    .sort((a, b) => {
+                        const areaA = (a.rect.width || 0) * (a.rect.height || 0);
+                        const areaB = (b.rect.width || 0) * (b.rect.height || 0);
+                        return areaB - areaA;
+                    })
+                    .slice(0, 4);
+
                 detectedTextDiv.value = "Capturing screenshot for backend OCR...";
                 try {
                     const screenshotDataUrl = await new Promise((resolve, reject) => {
@@ -172,17 +183,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const fullCtx = fullCanvas.getContext('2d');
                     fullCtx.drawImage(screenshotImg, 0, 0);
 
-                    const cropDataUrls = [];
-                    for (let i = 0; i < images.length; i++) {
-                        const img = images[i];
-                        if (!img.rect) continue;
-                        detectedTextDiv.value = `Preparing image region ${i + 1}/${images.length}...`;
+                    const cropDataUrls = [screenshotDataUrl];
+                    for (let i = 0; i < rankedImages.length; i++) {
+                        const img = rankedImages[i];
+                        detectedTextDiv.value = `Preparing image region ${i + 1}/${rankedImages.length}...`;
                         const left = Math.max(0, Math.round(img.rect.left * img.dpr));
                         const top = Math.max(0, Math.round(img.rect.top * img.dpr));
                         const width = Math.round(img.rect.width * img.dpr);
                         const height = Math.round(img.rect.height * img.dpr);
-
-                        if (width <= 20 || height <= 20) continue;
 
                         const cropCanvas = document.createElement('canvas');
                         cropCanvas.width = width;
@@ -190,10 +198,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const cropCtx = cropCanvas.getContext('2d');
                         cropCtx.drawImage(fullCanvas, left, top, width, height, 0, 0, width, height);
                         cropDataUrls.push(cropCanvas.toDataURL('image/png'));
-                    }
-
-                    if (!cropDataUrls.length) {
-                        cropDataUrls.push(screenshotDataUrl);
                     }
 
                     detectedTextDiv.value = "Sending images to backend OCR...";
@@ -253,6 +257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         extractedClaimBox.style.display = 'none';
         evidenceSection.style.display = 'none';
         evidenceLinksDiv.innerHTML = '';
+        extractedClaimText.innerHTML = '';
 
         try {
             // Read current text from textarea (user might have edited it)
@@ -261,7 +266,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const response = await fetch(BACKEND_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: textToAnalyze })
+                body: JSON.stringify({
+                    text: textToAnalyze,
+                    selected_claim: currentSelectedClaim || undefined
+                })
             });
 
             if (!response.ok) throw new Error('Backend error: ' + response.statusText);
@@ -276,8 +284,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (data.is_cached) cacheBadge.style.display = 'inline-block';
 
             // Show extracted claim preview
-            if (data.extracted_claim && data.extracted_claim !== textToAnalyze) {
-                extractedClaimText.innerText = data.extracted_claim;
+            if ((data.extracted_claims && data.extracted_claims.length > 0) || (data.extracted_claim && data.extracted_claim !== textToAnalyze)) {
+                const claimOptions = data.extracted_claims && data.extracted_claims.length > 0
+                    ? data.extracted_claims
+                    : [data.extracted_claim];
+                extractedClaimText.innerHTML = "";
+                claimOptions.forEach((claim) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'margin-top:6px;';
+
+                    const claimText = document.createElement('div');
+                    claimText.textContent = claim;
+                    claimText.style.cssText = 'margin-bottom:4px; color:#333;';
+
+                    const chooseBtn = document.createElement('button');
+                    chooseBtn.textContent = claim === data.extracted_claim ? 'Selected Claim' : 'Check This Claim';
+                    chooseBtn.className = 'retry-btn';
+                    chooseBtn.style.cssText = 'width:auto; padding:4px 8px; font-size:11px;';
+                    chooseBtn.disabled = claim === data.extracted_claim;
+                    chooseBtn.addEventListener('click', () => {
+                        currentSelectedClaim = claim;
+                        checkBtn.click();
+                    });
+
+                    row.appendChild(claimText);
+                    row.appendChild(chooseBtn);
+                    extractedClaimText.appendChild(row);
+                });
                 extractedClaimBox.style.display = 'block';
             }
 

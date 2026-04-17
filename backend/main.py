@@ -36,15 +36,22 @@ class FactCheckRequest(BaseModel):
     text: str
     category: Optional[str] = None
     subcategory: Optional[str] = None
+    selected_claim: Optional[str] = None
 
 class EvidenceLink(BaseModel):
     title: str
     url: str
     snippet: str
 
+class ClaimOption(BaseModel):
+    claim: str
+    evidence_links: List[EvidenceLink] = []
+
 class FactCheckResponse(BaseModel):
     verdict_md: str
     extracted_claim: str = ""
+    extracted_claims: List[str] = []
+    claim_options: List[ClaimOption] = []
     evidence_links: List[EvidenceLink] = []
     is_cached: bool = False
     claim_status: str = "factual_claim"
@@ -153,6 +160,34 @@ def _looks_like_attributed_post(text: str) -> bool:
     )
 
 
+def _should_prioritize_authorship(text: str, extracted_claim: str, suspected_author: str) -> bool:
+    if not text or not suspected_author:
+        return False
+    if not _looks_like_attributed_post(text):
+        return False
+
+    text_low = text.lower()
+    claim_low = (extracted_claim or "").lower()
+    attribution_signals = [
+        "posted",
+        "tweeted",
+        "wrote",
+        "shared",
+        "said",
+        "statement",
+        "quote",
+    ]
+    if any(signal in text_low for signal in attribution_signals):
+        return True
+
+    # If the extracted claim is itself just a shallow attribution paraphrase,
+    # avoid doubling down on authorship-first routing.
+    if any(signal in claim_low for signal in attribution_signals):
+        return False
+
+    return False
+
+
 def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]:
     def _dedupe(items: List[str]) -> List[str]:
         seen = set()
@@ -172,14 +207,15 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     suspected_author = _extract_suspected_author(original_text)
     quote_fragment = _extract_quote_fragment(original_text, suspected_author)
 
+    queries.append(f"{extracted_claim} fact check")
+    queries.append(f"{extracted_claim} false misleading evidence")
+
     if _looks_like_attributed_post(original_text) and suspected_author:
         if quote_fragment:
             queries.append(f'"{suspected_author}" "{quote_fragment}" news')
             queries.append(f'"{suspected_author}" "{quote_fragment}" fact check')
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
-
-    queries.append(f"{extracted_claim} fact check")
     return _dedupe(queries)[:4]
 
 
@@ -198,6 +234,100 @@ def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8)
             if len(merged) >= max_results:
                 return merged
     return merged
+
+
+def _filter_credible(results, category: Optional[str] = None):
+    import urllib.parse
+    blacklist = [
+        'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com',
+        'reddit.com', 'youtube.com', 'medium.com', 'quora.com', 'blogspot.com', 'wordpress.com',
+        'pinterest.com', 'linkedin.com'
+    ]
+
+    global_allowlist = [
+        'reuters.com', 'apnews.com', 'bbc.co.uk', 'bbc.com', 'nytimes.com', 'washingtonpost.com',
+        'theguardian.com', 'cnn.com', 'bloomberg.com', 'economist.com', 'factcheck.org', 'snopes.com',
+        'politifact.com', 'fullfact.org', 'afp.com', 'africacheck.org', 'leadstories.com'
+    ]
+
+    category_allowlists = {
+        'health': ['cdc.gov', 'who.int', 'nejm.org', 'hmh.com'],
+        'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com'],
+        'economy': ['ft.com', 'economist.com', 'bloomberg.com', 'wsj.com'],
+        'science': ['nature.com', 'sciencemag.org', 'who.int'],
+        'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com'],
+        'default': global_allowlist
+    }
+
+    filtered = []
+    prefer = []
+    for r in results:
+        link = (r.get('link') or r.get('url') or r.get('href') or r.get('source') or '')
+        r['link'] = link
+        try:
+            host = urllib.parse.urlparse(link).hostname or ''
+            host = host.lower()
+            if host.startswith('www.'):
+                host = host[4:]
+        except Exception:
+            host = ''
+
+        if host:
+            skip = False
+            for b in blacklist:
+                if host == b or host.endswith('.' + b):
+                    skip = True
+                    break
+            if skip:
+                continue
+
+        preferred = False
+        if category:
+            cat = category.lower()
+            cat_list = category_allowlists.get(cat, [])
+            for a in cat_list:
+                if host == a or host.endswith('.' + a):
+                    preferred = True
+                    break
+        if not preferred:
+            for a in global_allowlist:
+                if host == a or host.endswith('.' + a):
+                    preferred = True
+                    break
+
+        if preferred or host.endswith('.gov') or host.endswith('.edu'):
+            prefer.append(r)
+        else:
+            t = (r.get('title') or '').lower()
+            s = (r.get('snippet') or '').lower()
+            if 'news' in host or 'news' in t or 'news' in s or 'report' in t or 'report' in s or 'says' in t:
+                filtered.append(r)
+
+    if prefer:
+        return prefer
+    return filtered or results
+
+
+def _search_claim_results(claim_text: str, original_text: str, category: Optional[str], suspected_author: str = "") -> List[Dict]:
+    search_queries = _build_search_queries(original_text, claim_text)
+    try:
+        collected_results = []
+        for query in search_queries:
+            ddg_results = DuckDuckGoService.search(query, max_results=8)
+            if ddg_results:
+                collected_results.append(ddg_results)
+                continue
+            collected_results.append(SerperService.search(query))
+        search_results = _merge_search_results(collected_results, max_results=10)
+    except Exception as e:
+        print('DuckDuckGo search failed, falling back to Serper:', e)
+        fallback_results = [SerperService.search(query) for query in search_queries]
+        search_results = _merge_search_results(fallback_results, max_results=10)
+
+    if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
+        print(f"Authorship-sensitive search triggered for claim: {claim_text}")
+
+    return _filter_credible(search_results, category=category)
 
 
 def _extract_verdict_label(verdict_md: str) -> str:
@@ -624,9 +754,19 @@ async def perform_fact_check(request: FactCheckRequest):
             EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
             for e in filtered_cached
         ]
+        claim_options = []
+        for option in metadata.get("claim_options", []) or []:
+            option_links = [
+                EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
+                for e in option.get("evidence_links", [])
+                if e.get("url")
+            ]
+            claim_options.append(ClaimOption(claim=option.get("claim", ""), evidence_links=option_links))
         return FactCheckResponse(
             verdict_md=verdict_md,
             extracted_claim=metadata.get("extracted_claim", ""),
+            extracted_claims=metadata.get("extracted_claims", []),
+            claim_options=claim_options,
             evidence_links=evidence_links_resp,
             is_cached=True,
             claim_status=metadata.get("claim_status", "factual_claim"),
@@ -654,6 +794,8 @@ async def perform_fact_check(request: FactCheckRequest):
             [],
             metadata={
                 "extracted_claim": "",
+                "extracted_claims": [],
+                "claim_options": [],
                 "claim_status": claim_status,
                 "claim_reason": claim_reason,
             },
@@ -667,8 +809,18 @@ async def perform_fact_check(request: FactCheckRequest):
             claim_reason=claim_reason,
         )
 
-    # 2. Extract the main claim from the text
-    extracted_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
+    # 2. Extract candidate claims and select the active one.
+    extracted_claims = gemini_service.extract_claims(request.text, max_claims=3)
+    fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
+    if fallback_claim and fallback_claim not in extracted_claims:
+        extracted_claims.insert(0, fallback_claim)
+    extracted_claims = [claim for claim in extracted_claims if claim][:3]
+
+    selected_claim = (request.selected_claim or "").strip()
+    if selected_claim and selected_claim in extracted_claims:
+        extracted_claim = selected_claim
+    else:
+        extracted_claim = extracted_claims[0] if extracted_claims else fallback_claim
     print(f"Extracted claim: {extracted_claim}")
 
     # If the claim appears to describe a money giveaway / too-good-to-be-true ad,
@@ -695,116 +847,25 @@ async def perform_fact_check(request: FactCheckRequest):
         return False
 
     suspected_author = _extract_suspected_author(request.text)
+    prioritize_authorship = _should_prioritize_authorship(request.text, extracted_claim, suspected_author)
 
-    # 3. Search for information using attribution-first queries when the text looks
-    # like a quoted social post. Bias toward direct claim checks and wire coverage.
-    search_queries = _build_search_queries(request.text, extracted_claim)
-
-    # For scam-like claims, add extra keywords
-    if _is_scam_like(extracted_claim) or _is_scam_like(request.text):
-        search_queries.insert(0, f"{extracted_claim} scam misleading fact check")
-        print(f"Enhanced search queries for scam-like claim: {search_queries}")
-
-    # Prefer DuckDuckGo results when available
-    search_results = []
-    try:
-        collected_results = []
-        for query in search_queries:
-            ddg_results = DuckDuckGoService.search(query, max_results=8)
-            if ddg_results:
-                collected_results.append(ddg_results)
-                continue
-            collected_results.append(SerperService.search(query))
-        search_results = _merge_search_results(collected_results, max_results=10)
-    except Exception as e:
-        print('DuckDuckGo search failed, falling back to Serper:', e)
-        fallback_results = [SerperService.search(query) for query in search_queries]
-        search_results = _merge_search_results(fallback_results, max_results=10)
-
-    # 3b. Filter search results to prefer credible sources and exclude social media/unofficial sites
-    def _filter_credible(results, category: Optional[str] = None):
-        import urllib.parse
-        # Blacklist known social and unofficial domains
-        blacklist = [
-            'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'tiktok.com',
-            'reddit.com', 'youtube.com', 'medium.com', 'quora.com', 'blogspot.com', 'wordpress.com',
-            'pinterest.com', 'linkedin.com'
+    claim_options = []
+    claim_results_map = {}
+    for claim in extracted_claims[:3]:
+        claim_results = _search_claim_results(claim, request.text, request.category, suspected_author=suspected_author)
+        claim_results_map[claim] = claim_results
+        option_links = [
+            EvidenceLink(
+                title=r.get("title", "Source"),
+                url=r.get("link", ""),
+                snippet=r.get("snippet", "")
+            )
+            for r in claim_results[:3]
+            if r.get("link") and not _is_social_link(r.get("link"))
         ]
+        claim_options.append(ClaimOption(claim=claim, evidence_links=option_links))
 
-        # Allowlist authoritative news and fact-check domains (expand as needed)
-        global_allowlist = [
-            'reuters.com', 'apnews.com', 'bbc.co.uk', 'bbc.com', 'nytimes.com', 'washingtonpost.com',
-            'theguardian.com', 'cnn.com', 'bloomberg.com', 'economist.com', 'factcheck.org', 'snopes.com',
-            'politifact.com', 'fullfact.org', 'afp.com', 'africacheck.org', 'leadstories.com'
-        ]
-
-        # Category-specific allowlists to prioritize domain authority per topic
-        category_allowlists = {
-            'health': ['cdc.gov', 'who.int', 'nejm.org', 'hmh.com'],
-            'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com'],
-            'economy': ['ft.com', 'economist.com', 'bloomberg.com', 'wsj.com'],
-            'science': ['nature.com', 'sciencemag.org', 'who.int'],
-            'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com'],
-            'default': global_allowlist
-        }
-
-        filtered = []
-        prefer = []
-        for r in results:
-            # Normalize potential link keys
-            link = (r.get('link') or r.get('url') or r.get('href') or r.get('source') or '')
-            r['link'] = link
-            try:
-                host = urllib.parse.urlparse(link).hostname or ''
-                host = host.lower()
-                if host.startswith('www.'):
-                    host = host[4:]
-            except Exception:
-                host = ''
-
-            # Exclude blacklisted domains (exact or subdomain match)
-            if host:
-                skip = False
-                for b in blacklist:
-                    if host == b or host.endswith('.' + b):
-                        skip = True
-                        break
-                if skip:
-                    continue
-
-            # Prefer category-specific allowlist first, then global
-            preferred = False
-            if category:
-                cat = category.lower()
-                cat_list = category_allowlists.get(cat, [])
-                for a in cat_list:
-                    if host == a or host.endswith('.' + a):
-                        preferred = True
-                        break
-            if not preferred:
-                for a in global_allowlist:
-                    if host == a or host.endswith('.' + a):
-                        preferred = True
-                        break
-
-            if preferred or host.endswith('.gov') or host.endswith('.edu'):
-                prefer.append(r)
-            else:
-                # Heuristic: include if domain contains 'news' or title/snippet mentions 'report' or 'says'
-                t = (r.get('title') or '').lower()
-                s = (r.get('snippet') or '').lower()
-                if 'news' in host or 'news' in t or 'news' in s or 'report' in t or 'report' in s or 'says' in t:
-                    filtered.append(r)
-
-        # If we have preferred authoritative sources, return them first
-        if prefer:
-            return prefer
-        # Otherwise return filtered heuristics (may be empty)
-        return filtered or results
-
-    filtered_results = _filter_credible(search_results, category=request.category)
-    # Use filtered results for evidence links and fact-checking
-    search_results = filtered_results
+    search_results = claim_results_map.get(extracted_claim, [])
 
     # 4. Analyze with Gemini
     result_md = gemini_service.fact_check(
@@ -812,6 +873,7 @@ async def perform_fact_check(request: FactCheckRequest):
         search_results,
         original_text=request.text,
         suspected_author=suspected_author,
+        prioritize_authorship=prioritize_authorship,
     )
 
     # 5. Format evidence links (defensive: exclude any social/user-generated links)
@@ -838,6 +900,17 @@ async def perform_fact_check(request: FactCheckRequest):
             evidence_links_for_cache,
             metadata={
                 "extracted_claim": extracted_claim,
+                "extracted_claims": extracted_claims,
+                "claim_options": [
+                    {
+                        "claim": option.claim,
+                        "evidence_links": [
+                            {"title": e.title, "url": e.url, "snippet": e.snippet}
+                            for e in option.evidence_links
+                        ],
+                    }
+                    for option in claim_options
+                ],
                 "claim_status": claim_status,
                 "claim_reason": claim_reason,
             },
@@ -846,6 +919,8 @@ async def perform_fact_check(request: FactCheckRequest):
     return FactCheckResponse(
         verdict_md=result_md,
         extracted_claim=extracted_claim,
+        extracted_claims=extracted_claims,
+        claim_options=claim_options,
         evidence_links=evidence_links,
         is_cached=False,
         claim_status=claim_status,
@@ -861,19 +936,30 @@ class OcrRequest(BaseModel):
 async def ocr_images(req: OcrRequest):
     if not req.images:
         raise HTTPException(status_code=400, detail="No images provided")
+    print(f"[OCR] /ocr called with {len(req.images)} images")
     aggregated = []
     web_entities = []
     try:
-        for data_url in req.images:
+        for idx, data_url in enumerate(req.images, start=1):
+            print(f"[OCR] Processing image {idx}/{len(req.images)} data_url_chars={len(data_url or '')}")
             res = VisionService.ocr_data_url(data_url)
             text = res.get('text', '')
             aggregated.append(text or '')
+            print(
+                f"[OCR] Image {idx} result text_chars={len((text or '').strip())} "
+                f"web_entities={len(res.get('web_entities', []) or [])}"
+            )
             for entity in res.get('web_entities', []) or []:
                 if entity not in web_entities:
                     web_entities.append(entity)
         combined = '\n\n'.join([t for t in aggregated if t])
+        print(
+            f"[OCR] Completed OCR request combined_text_chars={len(combined.strip())} "
+            f"unique_web_entities={len(web_entities)}"
+        )
         return {"texts": aggregated, "combined": combined, "web_entities": web_entities[:10]}
     except Exception as e:
+        print(f"[OCR] OCR endpoint error: {e}")
         raise HTTPException(status_code=500, detail=f"OCR error: {e}")
 
 if __name__ == "__main__":

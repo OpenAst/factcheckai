@@ -9,5 +9,5 @@ services:
         sync: false
       - key: SERPER_API_KEY
         sync: false
-      - key: GOOGLE_VISION_CREDENTIALS_JSON
+      - key: EASYOCR_LANGS
         sync: false
