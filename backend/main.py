@@ -8,10 +8,10 @@ import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
-    from .services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
+    from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
 except ImportError:
-    from services import SerperService, GeminiService, VisionService, DuckDuckGoService, _is_social_link
+    from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
 
 load_dotenv()
@@ -926,41 +926,6 @@ async def perform_fact_check(request: FactCheckRequest):
         claim_status=claim_status,
         claim_reason=claim_reason,
     )
-
-
-class OcrRequest(BaseModel):
-    images: List[str]
-
-
-@app.post('/ocr')
-async def ocr_images(req: OcrRequest):
-    if not req.images:
-        raise HTTPException(status_code=400, detail="No images provided")
-    print(f"[OCR] /ocr called with {len(req.images)} images")
-    aggregated = []
-    web_entities = []
-    try:
-        for idx, data_url in enumerate(req.images, start=1):
-            print(f"[OCR] Processing image {idx}/{len(req.images)} data_url_chars={len(data_url or '')}")
-            res = VisionService.ocr_data_url(data_url)
-            text = res.get('text', '')
-            aggregated.append(text or '')
-            print(
-                f"[OCR] Image {idx} result text_chars={len((text or '').strip())} "
-                f"web_entities={len(res.get('web_entities', []) or [])}"
-            )
-            for entity in res.get('web_entities', []) or []:
-                if entity not in web_entities:
-                    web_entities.append(entity)
-        combined = '\n\n'.join([t for t in aggregated if t])
-        print(
-            f"[OCR] Completed OCR request combined_text_chars={len(combined.strip())} "
-            f"unique_web_entities={len(web_entities)}"
-        )
-        return {"texts": aggregated, "combined": combined, "web_entities": web_entities[:10]}
-    except Exception as e:
-        print(f"[OCR] OCR endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=f"OCR error: {e}")
 
 if __name__ == "__main__":
     import uvicorn

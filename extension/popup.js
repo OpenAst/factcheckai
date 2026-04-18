@@ -8,7 +8,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
     const checkBtn = document.getElementById('check-btn');
-    const scanImagesBtn = document.getElementById('scan-images-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
     const saveReviewStatus = document.getElementById('save-review-status');
@@ -123,119 +122,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Retry button listener
     retryBtn.addEventListener('click', tryExtract);
-
-    // Scan images for overlaid text using Tesseract.js (client-side OCR)
-    if (scanImagesBtn) {
-        scanImagesBtn.addEventListener('click', async () => {
-            scanImagesBtn.disabled = true;
-            detectedTextDiv.value = "Scanning images...";
-            try {
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                const results = await chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: () => {
-                        const imgs = Array.from(document.images || []).filter(i => i.naturalWidth > 30 && i.naturalHeight > 10);
-                        const out = [];
-                        for (const img of imgs) {
-                            try {
-                                const rect = img.getBoundingClientRect();
-                                out.push({ src: img.src, rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, dpr: window.devicePixelRatio || 1 });
-                            } catch (e) {
-                                out.push({ src: img.src });
-                            }
-                        }
-                        return out;
-                    }
-                });
-
-                const images = (results && results[0] && results[0].result) || [];
-                if (!images.length) {
-                    detectedTextDiv.value = "No images found on this page.";
-                    scanImagesBtn.disabled = false;
-                    return;
-                }
-
-                const rankedImages = images
-                    .filter(img => img.rect && img.rect.width > 20 && img.rect.height > 20)
-                    .sort((a, b) => {
-                        const areaA = (a.rect.width || 0) * (a.rect.height || 0);
-                        const areaB = (b.rect.width || 0) * (b.rect.height || 0);
-                        return areaB - areaA;
-                    })
-                    .slice(0, 4);
-
-                detectedTextDiv.value = "Capturing screenshot for backend OCR...";
-                try {
-                    const screenshotDataUrl = await new Promise((resolve, reject) => {
-                        chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-                            if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
-                            resolve(dataUrl);
-                        });
-                    });
-
-                    const screenshotImg = new Image();
-                    screenshotImg.src = screenshotDataUrl;
-                    await new Promise(r => (screenshotImg.onload = r));
-
-                    const fullCanvas = document.createElement('canvas');
-                    fullCanvas.width = screenshotImg.naturalWidth;
-                    fullCanvas.height = screenshotImg.naturalHeight;
-                    const fullCtx = fullCanvas.getContext('2d');
-                    fullCtx.drawImage(screenshotImg, 0, 0);
-
-                    const cropDataUrls = [screenshotDataUrl];
-                    for (let i = 0; i < rankedImages.length; i++) {
-                        const img = rankedImages[i];
-                        detectedTextDiv.value = `Preparing image region ${i + 1}/${rankedImages.length}...`;
-                        const left = Math.max(0, Math.round(img.rect.left * img.dpr));
-                        const top = Math.max(0, Math.round(img.rect.top * img.dpr));
-                        const width = Math.round(img.rect.width * img.dpr);
-                        const height = Math.round(img.rect.height * img.dpr);
-
-                        const cropCanvas = document.createElement('canvas');
-                        cropCanvas.width = width;
-                        cropCanvas.height = height;
-                        const cropCtx = cropCanvas.getContext('2d');
-                        cropCtx.drawImage(fullCanvas, left, top, width, height, 0, 0, width, height);
-                        cropDataUrls.push(cropCanvas.toDataURL('image/png'));
-                    }
-
-                    detectedTextDiv.value = "Sending images to backend OCR...";
-                    const ocrUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/ocr');
-                    const resp = await fetch(ocrUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ images: cropDataUrls })
-                    });
-                    const data = await resp.json();
-                    if (!resp.ok) throw new Error(data.detail || 'Server OCR failed');
-
-                    const combined = (data.combined || '').trim();
-                    if (combined) {
-                        detectedTextDiv.value = combined;
-                        checkBtn.disabled = false;
-                    } else if ((data.web_entities || []).length) {
-                        const hints = data.web_entities
-                            .map(entity => entity.description)
-                            .filter(Boolean)
-                            .slice(0, 5)
-                            .join(', ');
-                        detectedTextDiv.value = `No readable text found, but related web hints were detected: ${hints}`;
-                    } else {
-                        detectedTextDiv.value = "No readable text found in images after backend OCR.";
-                    }
-                } catch (capErr) {
-                    console.warn('Backend-first OCR flow failed', capErr);
-                    detectedTextDiv.value = "Image scanning failed: " + (capErr && capErr.message ? capErr.message : capErr);
-                }
-
-            } catch (err) {
-                detectedTextDiv.value = "Image scanning failed: " + (err && err.message ? err.message : err);
-            } finally {
-                scanImagesBtn.disabled = false;
-            }
-        });
-    }
 
     // 2. Click handler for check button
     checkBtn.addEventListener('click', async () => {

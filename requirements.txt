@@ -5,8 +5,3 @@ requests
 gunicorn
 python-dotenv
 duckduckgo_search
-numpy
-Pillow
-torch
-torchvision
-easyocr

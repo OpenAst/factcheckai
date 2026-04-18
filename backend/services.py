@@ -3,18 +3,11 @@ import requests
 from google import genai
 from typing import List, Dict
 from dotenv import load_dotenv
-import base64
-import io
 from urllib.parse import urlparse
 try:
     from duckduckgo_search import DDGS
 except Exception:
     DDGS = None
-
-try:
-    import easyocr
-except Exception:
-    easyocr = None
 
 load_dotenv()
 
@@ -352,123 +345,3 @@ STRUCTURE:
 
 If search results are empty or irrelevant, state "Unverified" and explain why."""
         return self._call_model(prompt)
-
-
-class VisionService:
-    """OCR helper built around EasyOCR."""
-
-    @staticmethod
-    def _log(message: str):
-        print(f"[VisionService] {message}")
-
-    _easyocr_reader = None
-
-    @staticmethod
-    def _preprocess_image_bytes(image_bytes: bytes) -> List[bytes]:
-        """Generate a few OCR-friendly variants for screenshot text."""
-        try:
-            from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-        except Exception:
-            return [image_bytes]
-
-        variants: List[bytes] = [image_bytes]
-        try:
-            original = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-            boosted = original.resize(
-                (max(1, original.width * 2), max(1, original.height * 2)),
-                Image.Resampling.LANCZOS,
-            )
-            gray = ImageOps.grayscale(boosted)
-            contrast = ImageEnhance.Contrast(gray).enhance(1.8)
-            sharpened = contrast.filter(ImageFilter.SHARPEN)
-            thresholded = sharpened.point(lambda px: 255 if px > 165 else 0)
-
-            for img in (boosted, sharpened, thresholded):
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                variants.append(buf.getvalue())
-        except Exception as e:
-            VisionService._log(f"Image preprocessing failed: {e}")
-
-        return variants
-
-    @staticmethod
-    def _get_easyocr_reader():
-        if easyocr is None:
-            message = "EasyOCR package is unavailable. Install easyocr, torch, and torchvision."
-            VisionService._log(message)
-            raise RuntimeError(message)
-        if VisionService._easyocr_reader is not None:
-            return VisionService._easyocr_reader
-
-        try:
-            languages_raw = os.getenv("EASYOCR_LANGS", "en")
-            languages = [lang.strip() for lang in languages_raw.split(",") if lang.strip()]
-            VisionService._log(f"Initializing EasyOCR with langs={languages}")
-            VisionService._easyocr_reader = easyocr.Reader(languages, gpu=False)
-            return VisionService._easyocr_reader
-        except Exception as e:
-            message = f"Failed to initialize EasyOCR: {e}"
-            VisionService._log(message)
-            raise RuntimeError(message)
-
-    @staticmethod
-    def _ocr_with_easyocr(image_bytes: bytes) -> Dict:
-        reader = VisionService._get_easyocr_reader()
-
-        try:
-            from PIL import Image
-            import numpy as np
-
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            result = reader.readtext(np.array(image), detail=0, paragraph=False)
-            lines = [(item or "").strip() for item in (result or []) if (item or "").strip()]
-
-            combined = "\n".join(lines).strip()
-            VisionService._log(f"EasyOCR returned {len(combined)} characters")
-            return {'text': combined, 'web_entities': []}
-        except Exception as e:
-            VisionService._log(f"EasyOCR failed: {e}")
-            return {'text': '', 'web_entities': []}
-
-    @staticmethod
-    def ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> Dict:
-        prepared_images = VisionService._preprocess_image_bytes(image_bytes)
-        VisionService._log(
-            f"OCR request received: original_bytes={len(image_bytes)} mime_type={mime_type} prepared_variants={len(prepared_images)}"
-        )
-
-        best_easyocr = {'text': '', 'web_entities': []}
-        for idx, candidate in enumerate(prepared_images, start=1):
-            VisionService._log(f"Trying EasyOCR variant {idx}/{len(prepared_images)}")
-            easyocr_result = VisionService._ocr_with_easyocr(candidate)
-            if len((easyocr_result.get('text') or '').strip()) > len(best_easyocr.get('text', '').strip()):
-                best_easyocr = easyocr_result
-        if best_easyocr.get('text'):
-            VisionService._log(
-                f"EasyOCR selected best result with text_chars={len(best_easyocr.get('text', '').strip())}"
-            )
-            return best_easyocr
-        VisionService._log("EasyOCR returned no readable text")
-        VisionService._log("All OCR providers returned no readable text")
-        return {'text': '', 'web_entities': []}
-
-    @staticmethod
-    def ocr_data_url(data_url: str) -> Dict:
-        # data_url like: data:image/png;base64,....
-        if not data_url:
-            return {'text': '', 'web_entities': []}
-        try:
-            header, b64 = data_url.split(',', 1)
-            mime_type = "image/png"
-            if header.startswith("data:") and ";" in header:
-                mime_type = header[5:].split(";", 1)[0] or mime_type
-            image_bytes = base64.b64decode(b64)
-            VisionService._log(f"Decoded data URL to {len(image_bytes)} bytes ({mime_type})")
-            return VisionService.ocr_image_bytes(image_bytes, mime_type=mime_type)
-        except RuntimeError:
-            raise
-        except Exception as e:
-            VisionService._log(f"ocr_data_url error: {e}")
-            return {'text': '', 'web_entities': []}
