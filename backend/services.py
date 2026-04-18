@@ -1,6 +1,7 @@
 import os
 import requests
 from google import genai
+from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ except Exception:
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 # Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
@@ -107,6 +109,11 @@ GEMINI_MODELS = [
     "gemini-2.0-flash-001",
 ]
 
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+
 class SerperService:
     @staticmethod
     def search(query: str) -> List[Dict]:
@@ -160,7 +167,32 @@ class DuckDuckGoService:
 
 class GeminiService:
     def __init__(self):
+        self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
         self.gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+    def _call_groq(self, prompt: str) -> str:
+        """Try Groq models first."""
+        if not self.groq_client:
+            raise Exception("No GROQ_API_KEY set")
+        attempted_models = []
+        last_error = None
+        for model_name in GROQ_MODELS:
+            try:
+                print(f"Trying Groq model: {model_name}")
+                attempted_models.append(model_name)
+                response = self.groq_client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                )
+                content = response.choices[0].message.content if response.choices else ""
+                return content or ""
+            except Exception as e:
+                last_error = str(e)
+                print(f"Groq model {model_name} failed: {last_error}")
+                continue
+        attempted = ", ".join(attempted_models) if attempted_models else "none"
+        raise Exception(f"All Groq models failed after trying [{attempted}]. Last error: {last_error}")
 
     def _call_gemini(self, prompt: str) -> str:
         """Try Gemini models."""
@@ -185,11 +217,15 @@ class GeminiService:
         raise Exception(f"All Gemini models failed after trying [{attempted}]. Last error: {last_error}")
 
     def _call_model(self, prompt: str) -> str:
-        """Use Gemini only."""
+        """Use Groq first, then fall back to Gemini."""
         try:
-            return self._call_gemini(prompt)
-        except Exception as gemini_err:
-            return f"AI error (Gemini failed): {gemini_err}"
+            return self._call_groq(prompt)
+        except Exception as groq_err:
+            print(f"Groq failed, falling back to Gemini: {groq_err}")
+            try:
+                return self._call_gemini(prompt)
+            except Exception as gemini_err:
+                return f"AI error (Groq failed: {groq_err}; Gemini failed: {gemini_err})"
 
     def extract_claim(self, text: str) -> str:
         """Use AI to isolate the single main factual claim from the text."""
