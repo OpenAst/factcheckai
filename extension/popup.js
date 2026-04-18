@@ -158,7 +158,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 })
             });
 
-            if (!response.ok) throw new Error('Backend error: ' + response.statusText);
+            if (!response.ok) {
+                let backendDetail = response.statusText || 'Unknown backend error';
+                try {
+                    const errorData = await response.json();
+                    backendDetail = errorData.detail || errorData.message || JSON.stringify(errorData);
+                } catch (_) {
+                    try {
+                        backendDetail = await response.text();
+                    } catch (_) {}
+                }
+                throw new Error('Backend error: ' + backendDetail);
+            }
 
             const data = await response.json();
             currentFactCheckData = {

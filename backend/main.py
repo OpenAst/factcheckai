@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import re
 import os
+import traceback
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
@@ -218,7 +219,7 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             queries.append(f'"{suspected_author}" "{quote_fragment}" fact check')
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
-    return _dedupe(queries)[:4]
+    return _dedupe(queries)[:3]
 
 
 def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8) -> List[Dict]:
@@ -315,14 +316,16 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
     try:
         collected_results = []
         for query in search_queries:
-            ddg_results = DuckDuckGoService.search(query, max_results=8)
+            serper_results = SerperService.search(query)
+            if serper_results:
+                collected_results.append(serper_results)
+                continue
+            ddg_results = DuckDuckGoService.search(query, max_results=5)
             if ddg_results:
                 collected_results.append(ddg_results)
-                continue
-            collected_results.append(SerperService.search(query))
         search_results = _merge_search_results(collected_results, max_results=10)
     except Exception as e:
-        print('DuckDuckGo search failed, falling back to Serper:', e)
+        print('Primary search failed, falling back to Serper only:', e)
         fallback_results = [SerperService.search(query) for query in search_queries]
         search_results = _merge_search_results(fallback_results, max_results=10)
 
@@ -739,212 +742,232 @@ def admin_ui():
 
 @app.post("/factcheck", response_model=FactCheckResponse)
 async def perform_fact_check(request: FactCheckRequest):
-    if not request.text:
-        raise HTTPException(status_code=400, detail="Empty text provided")
+    try:
+        if not request.text:
+            raise HTTPException(status_code=400, detail="Empty text provided")
 
-    # 0. Check cache
-    cached_result = CacheService.get_cached_verdict(request.text)
-    if cached_result:
-        verdict_md = cached_result.get("verdict_markdown")
-        evidence_links_cached = cached_result.get("evidence_links", [])
-        metadata = cached_result.get("metadata", {})
-        cache_version = metadata.get("cache_version")
-        if cache_version != CACHE_VERSION:
-            print(
-                f"Skipping stale cache for: {request.text[:50]}... "
-                f"(cached version={cache_version}, expected={CACHE_VERSION})"
-            )
-            cached_result = None
-        elif verdict_md and ("AI error" in verdict_md or "Fact-checking error" in verdict_md):
-            print(f"Skipping cached error result for: {request.text[:50]}...")
-            cached_result = None
+        print(
+            f"[factcheck] start text_chars={len(request.text)} "
+            f"selected_claim={'yes' if request.selected_claim else 'no'}"
+        )
 
-    if cached_result:
-        print(f"Cache hit for: {request.text[:50]}...")
-        # Return cached verdict and evidence links when available
-        verdict_md = cached_result.get("verdict_markdown")
-        evidence_links_cached = cached_result.get("evidence_links", [])
-        metadata = cached_result.get("metadata", {})
-        # Filter cached evidence to exclude social/user-generated links, then map
-        filtered_cached = [e for e in (evidence_links_cached or []) if e.get('url') and not _is_social_link(e.get('url'))]
-        evidence_links_resp = [
-            EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
-            for e in filtered_cached
-        ]
-        claim_options = []
-        for option in metadata.get("claim_options", []) or []:
-            option_links = [
+        # 0. Check cache
+        cached_result = CacheService.get_cached_verdict(request.text)
+        if cached_result:
+            verdict_md = cached_result.get("verdict_markdown")
+            evidence_links_cached = cached_result.get("evidence_links", [])
+            metadata = cached_result.get("metadata", {})
+            cache_version = metadata.get("cache_version")
+            if cache_version != CACHE_VERSION:
+                print(
+                    f"Skipping stale cache for: {request.text[:50]}... "
+                    f"(cached version={cache_version}, expected={CACHE_VERSION})"
+                )
+                cached_result = None
+            elif verdict_md and ("AI error" in verdict_md or "Fact-checking error" in verdict_md):
+                print(f"Skipping cached error result for: {request.text[:50]}...")
+                cached_result = None
+
+        if cached_result:
+            print(f"[factcheck] cache hit for: {request.text[:50]}...")
+            verdict_md = cached_result.get("verdict_markdown")
+            evidence_links_cached = cached_result.get("evidence_links", [])
+            metadata = cached_result.get("metadata", {})
+            filtered_cached = [e for e in (evidence_links_cached or []) if e.get('url') and not _is_social_link(e.get('url'))]
+            evidence_links_resp = [
                 EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
-                for e in option.get("evidence_links", [])
-                if e.get("url")
+                for e in filtered_cached
             ]
-            claim_options.append(ClaimOption(claim=option.get("claim", ""), evidence_links=option_links))
-        return FactCheckResponse(
-            verdict_md=verdict_md,
-            extracted_claim=metadata.get("extracted_claim", ""),
-            extracted_claims=metadata.get("extracted_claims", []),
-            claim_options=claim_options,
-            evidence_links=evidence_links_resp,
-            is_cached=True,
-            claim_status=metadata.get("claim_status", "factual_claim"),
-            claim_reason=metadata.get("claim_reason", ""),
+            claim_options = []
+            for option in metadata.get("claim_options", []) or []:
+                option_links = [
+                    EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
+                    for e in option.get("evidence_links", [])
+                    if e.get("url")
+                ]
+                claim_options.append(ClaimOption(claim=option.get("claim", ""), evidence_links=option_links))
+            return FactCheckResponse(
+                verdict_md=verdict_md,
+                extracted_claim=metadata.get("extracted_claim", ""),
+                extracted_claims=metadata.get("extracted_claims", []),
+                claim_options=claim_options,
+                evidence_links=evidence_links_resp,
+                is_cached=True,
+                claim_status=metadata.get("claim_status", "factual_claim"),
+                claim_reason=metadata.get("claim_reason", ""),
+            )
+
+        print("[factcheck] classifying claimability")
+        claimability = gemini_service.classify_claimability(request.text)
+        claim_status = claimability.get("status", "factual_claim")
+        claim_reason = claimability.get("reason", "")
+
+        if claim_status == "no_claim":
+            result_md = (
+                "**Verdict**: No Claim\n\n"
+                f"**Summary**: {claim_reason or 'This post does not contain a specific factual claim that needs fact-checking.'}\n\n"
+                "**Key Points**:\n"
+                "- The content is mainly opinion, commentary, rhetoric, or personal expression.\n"
+                "- There is no single concrete factual assertion to verify against news or primary evidence.\n"
+                "- No web fact-check search was run because this item is not a checkable claim.\n\n"
+                "**Date Check**: Not applicable."
+            )
+            CacheService.save_to_cache(
+                request.text,
+                result_md,
+                [],
+                metadata={
+                    "cache_version": CACHE_VERSION,
+                    "extracted_claim": "",
+                    "extracted_claims": [],
+                    "claim_options": [],
+                    "claim_status": claim_status,
+                    "claim_reason": claim_reason,
+                },
+            )
+            return FactCheckResponse(
+                verdict_md=result_md,
+                extracted_claim="",
+                evidence_links=[],
+                is_cached=False,
+                claim_status=claim_status,
+                claim_reason=claim_reason,
+            )
+
+        print("[factcheck] extracting candidate claims")
+        extracted_claims = gemini_service.extract_claims(request.text, max_claims=3)
+        fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
+        if fallback_claim and fallback_claim not in extracted_claims:
+            extracted_claims.insert(0, fallback_claim)
+        extracted_claims = [claim for claim in extracted_claims if claim][:3]
+
+        selected_claim = (request.selected_claim or "").strip()
+        if selected_claim and selected_claim in extracted_claims:
+            extracted_claim = selected_claim
+        else:
+            extracted_claim = extracted_claims[0] if extracted_claims else fallback_claim
+        print(f"[factcheck] active claim: {extracted_claim}")
+
+        suspected_author = _extract_suspected_author(request.text)
+        prioritize_authorship = _should_prioritize_authorship(request.text, extracted_claim, suspected_author)
+
+        print("[factcheck] gathering search results")
+        claim_options = []
+        claim_results_map = {}
+        preview_claims = extracted_claims[:2]
+        for claim in preview_claims:
+            claim_results = _search_claim_results(claim, request.text, request.category, suspected_author=suspected_author)
+            claim_results_map[claim] = claim_results
+            option_links = [
+                EvidenceLink(
+                    title=r.get("title", "Source"),
+                    url=r.get("link", ""),
+                    snippet=r.get("snippet", "")
+                )
+                for r in claim_results[:3]
+                if r.get("link") and not _is_social_link(r.get("link"))
+            ]
+            claim_options.append(ClaimOption(claim=claim, evidence_links=option_links))
+
+        if extracted_claim not in claim_results_map:
+            claim_results_map[extracted_claim] = _search_claim_results(
+                extracted_claim,
+                request.text,
+                request.category,
+                suspected_author=suspected_author,
+            )
+            claim_options.append(
+                ClaimOption(
+                    claim=extracted_claim,
+                    evidence_links=[
+                        EvidenceLink(
+                            title=r.get("title", "Source"),
+                            url=r.get("link", ""),
+                            snippet=r.get("snippet", ""),
+                        )
+                        for r in claim_results_map[extracted_claim][:3]
+                        if r.get("link") and not _is_social_link(r.get("link"))
+                    ],
+                )
+            )
+
+        deduped_claim_options = []
+        seen_claims = set()
+        for option in claim_options:
+            key = option.claim.strip().lower()
+            if not key or key in seen_claims:
+                continue
+            seen_claims.add(key)
+            deduped_claim_options.append(option)
+        claim_options = deduped_claim_options[:3]
+
+        search_results = claim_results_map.get(extracted_claim, [])
+
+        print(f"[factcheck] generating verdict using {len(search_results)} search results")
+        result_md = gemini_service.fact_check(
+            extracted_claim,
+            search_results,
+            original_text=request.text,
+            suspected_author=suspected_author,
+            prioritize_authorship=prioritize_authorship,
         )
 
-    # 1. Decide whether the text contains a fact-checkable claim.
-    claimability = gemini_service.classify_claimability(request.text)
-    claim_status = claimability.get("status", "factual_claim")
-    claim_reason = claimability.get("reason", "")
-
-    if claim_status == "no_claim":
-        result_md = (
-            "**Verdict**: No Claim\n\n"
-            f"**Summary**: {claim_reason or 'This post does not contain a specific factual claim that needs fact-checking.'}\n\n"
-            "**Key Points**:\n"
-            "- The content is mainly opinion, commentary, rhetoric, or personal expression.\n"
-            "- There is no single concrete factual assertion to verify against news or primary evidence.\n"
-            "- No web fact-check search was run because this item is not a checkable claim.\n\n"
-            "**Date Check**: Not applicable."
-        )
-        CacheService.save_to_cache(
-            request.text,
-            result_md,
-            [],
-            metadata={
-                "cache_version": CACHE_VERSION,
-                "extracted_claim": "",
-                "extracted_claims": [],
-                "claim_options": [],
-                "claim_status": claim_status,
-                "claim_reason": claim_reason,
-            },
-        )
-        return FactCheckResponse(
-            verdict_md=result_md,
-            extracted_claim="",
-            evidence_links=[],
-            is_cached=False,
-            claim_status=claim_status,
-            claim_reason=claim_reason,
-        )
-
-    # 2. Extract candidate claims and select the active one.
-    extracted_claims = gemini_service.extract_claims(request.text, max_claims=3)
-    fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
-    if fallback_claim and fallback_claim not in extracted_claims:
-        extracted_claims.insert(0, fallback_claim)
-    extracted_claims = [claim for claim in extracted_claims if claim][:3]
-
-    selected_claim = (request.selected_claim or "").strip()
-    if selected_claim and selected_claim in extracted_claims:
-        extracted_claim = selected_claim
-    else:
-        extracted_claim = extracted_claims[0] if extracted_claims else fallback_claim
-    print(f"Extracted claim: {extracted_claim}")
-
-    # If the claim appears to describe a money giveaway / too-good-to-be-true ad,
-    # append keywords to improve search results for scam/misleading evidence.
-    def _is_scam_like(s: str) -> bool:
-        if not s:
-            return False
-        s_low = s.lower()
-        patterns = [
-            r"free\s+money",
-            r"free\s+dollars",
-            r"free\s+cash",
-            r"win\s+\$?\d+",
-            r"too\s+good\s+to\s+be\s+true",
-            r"get\s+rich\s+quick",
-            r"make\s+money\s+fast",
-            r"no\s+risk",
-            r"guaranteed\s+\w+",
-            r"earn\s+\$",
-        ]
-        for p in patterns:
-            if re.search(p, s_low):
-                return True
-        return False
-
-    suspected_author = _extract_suspected_author(request.text)
-    prioritize_authorship = _should_prioritize_authorship(request.text, extracted_claim, suspected_author)
-
-    claim_options = []
-    claim_results_map = {}
-    for claim in extracted_claims[:3]:
-        claim_results = _search_claim_results(claim, request.text, request.category, suspected_author=suspected_author)
-        claim_results_map[claim] = claim_results
-        option_links = [
+        safe_results = [r for r in search_results if r.get('link') and not _is_social_link(r.get('link'))]
+        evidence_links = [
             EvidenceLink(
                 title=r.get("title", "Source"),
                 url=r.get("link", ""),
                 snippet=r.get("snippet", "")
             )
-            for r in claim_results[:3]
-            if r.get("link") and not _is_social_link(r.get("link"))
+            for r in safe_results
         ]
-        claim_options.append(ClaimOption(claim=claim, evidence_links=option_links))
 
-    search_results = claim_results_map.get(extracted_claim, [])
+        evidence_links_for_cache = [
+            {"title": e.title, "url": e.url, "snippet": e.snippet} for e in evidence_links
+        ]
 
-    # 4. Analyze with Gemini
-    result_md = gemini_service.fact_check(
-        extracted_claim,
-        search_results,
-        original_text=request.text,
-        suspected_author=suspected_author,
-        prioritize_authorship=prioritize_authorship,
-    )
+        if "Fact-checking error" not in result_md and "AI error" not in result_md:
+            print("[factcheck] saving successful result to cache")
+            CacheService.save_to_cache(
+                request.text,
+                result_md,
+                evidence_links_for_cache,
+                metadata={
+                    "cache_version": CACHE_VERSION,
+                    "extracted_claim": extracted_claim,
+                    "extracted_claims": extracted_claims,
+                    "claim_options": [
+                        {
+                            "claim": option.claim,
+                            "evidence_links": [
+                                {"title": e.title, "url": e.url, "snippet": e.snippet}
+                                for e in option.evidence_links
+                            ],
+                        }
+                        for option in claim_options
+                    ],
+                    "claim_status": claim_status,
+                    "claim_reason": claim_reason,
+                },
+            )
 
-    # 5. Format evidence links (defensive: exclude any social/user-generated links)
-    safe_results = [r for r in search_results if r.get('link') and not _is_social_link(r.get('link'))]
-    evidence_links = [
-        EvidenceLink(
-            title=r.get("title", "Source"),
-            url=r.get("link", ""),
-            snippet=r.get("snippet", "")
+        print("[factcheck] completed successfully")
+        return FactCheckResponse(
+            verdict_md=result_md,
+            extracted_claim=extracted_claim,
+            extracted_claims=extracted_claims,
+            claim_options=claim_options,
+            evidence_links=evidence_links,
+            is_cached=False,
+            claim_status=claim_status,
+            claim_reason=claim_reason,
         )
-        for r in safe_results
-    ]
-
-    # Convert evidence links to simple dicts for caching
-    evidence_links_for_cache = [
-        {"title": e.title, "url": e.url, "snippet": e.snippet} for e in evidence_links
-    ]
-
-    # 6. Save to cache if successful (include evidence links)
-    if "Fact-checking error" not in result_md and "AI error" not in result_md:
-        CacheService.save_to_cache(
-            request.text,
-            result_md,
-            evidence_links_for_cache,
-            metadata={
-                "cache_version": CACHE_VERSION,
-                "extracted_claim": extracted_claim,
-                "extracted_claims": extracted_claims,
-                "claim_options": [
-                    {
-                        "claim": option.claim,
-                        "evidence_links": [
-                            {"title": e.title, "url": e.url, "snippet": e.snippet}
-                            for e in option.evidence_links
-                        ],
-                    }
-                    for option in claim_options
-                ],
-                "claim_status": claim_status,
-                "claim_reason": claim_reason,
-            },
-        )
-
-    return FactCheckResponse(
-        verdict_md=result_md,
-        extracted_claim=extracted_claim,
-        extracted_claims=extracted_claims,
-        claim_options=claim_options,
-        evidence_links=evidence_links,
-        is_cached=False,
-        claim_status=claim_status,
-        claim_reason=claim_reason,
-    )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[factcheck] unhandled error: {exc}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Fact-check pipeline failed: {exc}")
 
 if __name__ == "__main__":
     import uvicorn

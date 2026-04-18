@@ -4,4 +4,4 @@ google-genai
 requests
 gunicorn
 python-dotenv
-duckduckgo_search
+ddgs

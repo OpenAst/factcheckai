@@ -5,9 +5,12 @@ from typing import List, Dict
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 except Exception:
-    DDGS = None
+    try:
+        from duckduckgo_search import DDGS
+    except Exception:
+        DDGS = None
 
 load_dotenv()
 
@@ -114,7 +117,7 @@ class SerperService:
             'Content-Type': 'application/json'
         }
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=12)
             response.raise_for_status()
             results = response.json()
             organic = results.get("organic", [])
@@ -139,7 +142,7 @@ class DuckDuckGoService:
         Returns list of dicts with keys: title, link, snippet
         """
         if DDGS is None:
-            print('duckduckgo_search not available')
+            print('DDGS search package not available')
             return []
         try:
             results = DDGS().text(query, max_results=max_results)
