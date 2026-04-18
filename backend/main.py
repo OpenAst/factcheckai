@@ -81,6 +81,8 @@ class ReviewSelectionRequest(BaseModel):
 
 gemini_service = GeminiService()
 
+CACHE_VERSION = "2026-04-18-gemini-text-v2"
+
 # Admin token for simple auth on cache listing endpoint
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
@@ -743,6 +745,21 @@ async def perform_fact_check(request: FactCheckRequest):
     # 0. Check cache
     cached_result = CacheService.get_cached_verdict(request.text)
     if cached_result:
+        verdict_md = cached_result.get("verdict_markdown")
+        evidence_links_cached = cached_result.get("evidence_links", [])
+        metadata = cached_result.get("metadata", {})
+        cache_version = metadata.get("cache_version")
+        if cache_version != CACHE_VERSION:
+            print(
+                f"Skipping stale cache for: {request.text[:50]}... "
+                f"(cached version={cache_version}, expected={CACHE_VERSION})"
+            )
+            cached_result = None
+        elif verdict_md and ("AI error" in verdict_md or "Fact-checking error" in verdict_md):
+            print(f"Skipping cached error result for: {request.text[:50]}...")
+            cached_result = None
+
+    if cached_result:
         print(f"Cache hit for: {request.text[:50]}...")
         # Return cached verdict and evidence links when available
         verdict_md = cached_result.get("verdict_markdown")
@@ -793,6 +810,7 @@ async def perform_fact_check(request: FactCheckRequest):
             result_md,
             [],
             metadata={
+                "cache_version": CACHE_VERSION,
                 "extracted_claim": "",
                 "extracted_claims": [],
                 "claim_options": [],
@@ -899,6 +917,7 @@ async def perform_fact_check(request: FactCheckRequest):
             result_md,
             evidence_links_for_cache,
             metadata={
+                "cache_version": CACHE_VERSION,
                 "extracted_claim": extracted_claim,
                 "extracted_claims": extracted_claims,
                 "claim_options": [

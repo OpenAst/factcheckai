@@ -99,9 +99,9 @@ def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dic
 
 # Gemini models
 GEMINI_MODELS = [
-    "gemini-2.0-flash-001",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash-latest",
+    "gemini-2.0-flash-001",
 ]
 
 class SerperService:
@@ -163,10 +163,12 @@ class GeminiService:
         """Try Gemini models."""
         if not self.gemini_client:
             raise Exception("No GEMINI_API_KEY set")
+        attempted_models = []
         last_error = None
         for model_name in GEMINI_MODELS:
             try:
                 print(f"Trying Gemini model: {model_name}")
+                attempted_models.append(model_name)
                 response = self.gemini_client.models.generate_content(
                     model=model_name,
                     contents=prompt,
@@ -176,7 +178,8 @@ class GeminiService:
                 last_error = str(e)
                 print(f"Gemini model {model_name} failed: {last_error}")
                 continue
-        raise Exception(f"All Gemini models failed: {last_error}")
+        attempted = ", ".join(attempted_models) if attempted_models else "none"
+        raise Exception(f"All Gemini models failed after trying [{attempted}]. Last error: {last_error}")
 
     def _call_model(self, prompt: str) -> str:
         """Use Gemini only."""
