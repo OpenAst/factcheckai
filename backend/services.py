@@ -1,10 +1,15 @@
 import os
+import re
 import requests
 from google import genai
 from groq import Groq
 from typing import List, Dict
 from dotenv import load_dotenv
 from urllib.parse import urlparse
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
 try:
     from ddgs import DDGS
 except Exception:
@@ -18,6 +23,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+GUIDANCE_PDF_PATHS = [p.strip() for p in os.getenv("GUIDANCE_PDF_PATHS", "").split(os.pathsep) if p.strip()]
 
 # Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
 RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",") if d.strip()]
@@ -123,6 +129,104 @@ GROQ_MODELS = [
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
 ]
+
+_GUIDANCE_CACHE = None
+
+
+def _guidance_paths() -> List[str]:
+    if GUIDANCE_PDF_PATHS:
+        return [p for p in GUIDANCE_PDF_PATHS if os.path.isfile(p)]
+
+    backend_dir = os.path.dirname(__file__)
+    default_candidates = []
+    for filename in os.listdir(backend_dir):
+        if not filename.lower().endswith(".pdf"):
+            continue
+        if "uolo" not in filename.lower():
+            continue
+        default_candidates.append(os.path.join(backend_dir, filename))
+    return sorted(default_candidates)
+
+
+def _normalize_guidance_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _chunk_guidance_text(source_name: str, text: str, chunk_size: int = 1200) -> List[Dict[str, str]]:
+    chunks = []
+    normalized = text.replace("\r", "\n")
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", normalized) if p.strip()]
+    current = ""
+    chunk_index = 1
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if len(candidate) <= chunk_size:
+            current = candidate
+            continue
+        if current:
+            chunks.append({"source": source_name, "text": _normalize_guidance_text(current), "chunk_index": str(chunk_index)})
+            chunk_index += 1
+        current = paragraph[:chunk_size]
+    if current:
+        chunks.append({"source": source_name, "text": _normalize_guidance_text(current), "chunk_index": str(chunk_index)})
+    return chunks
+
+
+def _load_guidance_chunks() -> List[Dict[str, str]]:
+    global _GUIDANCE_CACHE
+    if _GUIDANCE_CACHE is not None:
+        return _GUIDANCE_CACHE
+
+    chunks = []
+    if PdfReader is None:
+        print("[guidance] pypdf not available; project guidance PDFs will not be loaded")
+        _GUIDANCE_CACHE = chunks
+        return chunks
+
+    for path in _guidance_paths():
+        try:
+            reader = PdfReader(path)
+            page_text = []
+            for page in reader.pages:
+                page_text.append(page.extract_text() or "")
+            combined = "\n".join(page_text).strip()
+            if not combined:
+                continue
+            chunks.extend(_chunk_guidance_text(os.path.basename(path), combined))
+        except Exception as exc:
+            print(f"[guidance] Failed to load {path}: {exc}")
+
+    print(f"[guidance] Loaded {len(chunks)} guidance chunks from {len(_guidance_paths())} PDF(s)")
+    _GUIDANCE_CACHE = chunks
+    return chunks
+
+
+def get_project_guidance(query: str, max_chunks: int = 3) -> str:
+    chunks = _load_guidance_chunks()
+    if not chunks:
+        return ""
+
+    query_terms = {term for term in re.findall(r"[a-z0-9]{3,}", (query or "").lower()) if len(term) >= 3}
+    if not query_terms:
+        return ""
+
+    scored = []
+    for chunk in chunks:
+        chunk_terms = set(re.findall(r"[a-z0-9]{3,}", chunk["text"].lower()))
+        overlap = len(query_terms & chunk_terms)
+        if overlap <= 0:
+            continue
+        scored.append((overlap, len(chunk["text"]), chunk))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected = [item[2] for item in scored[:max_chunks]]
+    if not selected:
+        return ""
+
+    return "\n\n".join(
+        f"[{item['source']} chunk {item['chunk_index']}]\n{item['text']}"
+        for item in selected
+    )
 
 class SerperService:
     @staticmethod
@@ -237,9 +341,24 @@ class GeminiService:
             except Exception as gemini_err:
                 return f"AI error (Groq failed: {groq_err}; Gemini failed: {gemini_err})"
 
+    def _guidance_block(self, query: str) -> str:
+        guidance = get_project_guidance(query)
+        if not guidance:
+            return ""
+        return f"""
+PROJECT GUIDANCE:
+Use the following internal project guidance as higher-priority workflow instruction when it is relevant.
+If a guidance snippet conflicts with your default tendency, follow the guidance snippet.
+
+{guidance}
+"""
+
     def extract_claim(self, text: str) -> str:
         """Use AI to isolate the single main factual claim from the text."""
+        guidance_block = self._guidance_block(text)
         prompt = f"""You are a senior fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
+
+{guidance_block}
 
 Rules:
 - Prefer the most consequential and specific factual assertion, not a vague topic summary.
@@ -261,8 +380,11 @@ MAIN CLAIM:"""
 
     def extract_claims(self, text: str, max_claims: int = 3) -> List[str]:
         """Extract up to three fact-checkable claims, ordered by importance."""
+        guidance_block = self._guidance_block(text)
         prompt = f"""You are a senior fact-checking assistant.
 From the text below, extract up to {max_claims} distinct VERIFIABLE FACTUAL CLAIMS.
+
+{guidance_block}
 
 Rules:
 - Return 2 claims when there are clearly 2 meaningful factual claims.
@@ -298,8 +420,11 @@ TEXT:
 
     def classify_claimability(self, text: str) -> Dict[str, str]:
         """Classify whether text contains a fact-checkable claim."""
+        guidance_block = self._guidance_block(text)
         prompt = f"""You are helping a fact-checking workflow.
 Decide whether the text contains a clear verifiable factual claim.
+
+{guidance_block}
 
 Rules:
 - Use NO_CLAIM when the text is mainly opinion, insult, praise, emotion, advice, satire, vague rhetoric, or personal preference.
@@ -353,6 +478,8 @@ TEXT:
         prioritize_authorship: bool = False,
     ) -> str:
         """Analyze the claim against search results and produce a verdict."""
+        guidance_query = f"{claim}\n{original_text}\n{suspected_author}"
+        guidance_block = self._guidance_block(guidance_query)
         context = ""
         for i, res in enumerate(search_results):
             context += f"Source {i+1}: {res.get('title')}\n"
@@ -382,6 +509,8 @@ TEXT:
 
         prompt = f"""You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
 Analyze the following claim using the provided search results.
+
+{guidance_block}
 
 CLAIM:
 {claim}
