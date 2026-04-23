@@ -38,7 +38,7 @@ PRIORITY_FACTCHECK_DOMAINS = [
 # Domains we treat as social media / user-generated content and want to exclude
 SOCIAL_DOMAINS = [
     'twitter.com', 't.co', 'facebook.com', 'instagram.com', 'reddit.com',
-    'youtube.com', 'youtu.be', 'linkedin.com', 'tiktok.com', 'snapchat.com', 
+    'youtube.com', 'youtu.be', 'linkedin.com', 'tiktok.com', 'snapchat.com',
     'threads.com', 'x.com'
 ]
 
@@ -56,6 +56,13 @@ def _normalize_netloc(link: str) -> str:
 def _is_social_link(link: str) -> bool:
     netloc = _normalize_netloc(link)
     return any(s == netloc or netloc.endswith('.' + s) or s in netloc for s in SOCIAL_DOMAINS)
+
+
+def _is_pdf_link(link: str) -> bool:
+    if not link:
+        return False
+    lowered = link.lower().split("?", 1)[0].split("#", 1)[0]
+    return lowered.endswith(".pdf")
 
 
 def _is_preferred_news(link: str) -> bool:
@@ -90,8 +97,11 @@ def _source_priority_score(link: str) -> int:
 
 
 def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dict]:
-    # Exclude obvious social/user-generated links
-    filtered = [r for r in results if r.get('link') and not _is_social_link(r.get('link'))]
+    # Exclude obvious social/user-generated links and PDFs
+    filtered = [
+        r for r in results
+        if r.get('link') and not _is_social_link(r.get('link')) and not _is_pdf_link(r.get('link'))
+    ]
     ordered = sorted(
         filtered,
         key=lambda r: (
@@ -233,8 +243,10 @@ class GeminiService:
 
 Rules:
 - Prefer the most consequential and specific factual assertion, not a vague topic summary.
+- If the input includes quoted article text plus separate media-overlay text or "All detected text", prioritize the overlaid/media claim first.
 - Do NOT just restate who posted the content unless authorship itself is the main checkable claim.
 - If the text contains several factual statements, choose the one that would matter most to verify for misinformation review.
+- If the text is promotional or ad-like but implies eligibility, hidden benefits, grants, payouts, compensation, deadlines, or urgent action, extract the IMPLIED factual claim behind the promotion.
 - Keep concrete names, places, dates, numbers, actions, and outcomes when present.
 
 Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
@@ -256,7 +268,11 @@ Rules:
 - Return 2 claims when there are clearly 2 meaningful factual claims.
 - Return 3 claims only when there are 3 genuinely distinct and important checkable claims.
 - Prefer consequential, specific claims over vague summaries.
+- If the input mixes image-overlay text with surrounding commentary or opinion, prioritize the image-overlay or media-detected text first.
 - Do NOT include opinion, rhetoric, or pure attribution unless authorship itself is a factual claim.
+- If the text explicitly attributes a quoted statement to a named person, you may include a secondary claim in the form: `<Person> said "<statement>"`, but only after the main substantive claim.
+- Treat scam ads, benefit-eligibility bait, urgent enrollment offers, grant/payout offers, and hidden-benefit promotions as fact-checkable claims even if phrased like marketing.
+- For promotional bait, extract the implied factual claim, not just the slogan.
 - Keep each claim short, concrete, and standalone.
 - If there is only 1 real factual claim, return just 1.
 - If there is no factual claim, return NO_CLAIM.
@@ -290,8 +306,12 @@ Rules:
 - Use FACTUAL_CLAIM when the text contains a specific claim that can be checked against evidence.
 - Use MIXED when the text mixes opinion with at least one checkable factual claim.
 - If MIXED, extract only the strongest and most consequential checkable factual claim.
+- If the input includes a separate media headline, overlaid text, or an "All detected text" section, prefer that factual claim over surrounding commentary.
 - Prefer the deepest factual assertion, not a surface-level paraphrase.
 - Do NOT select mere authorship or attribution as the claim unless the post is fundamentally about whether a named person made a statement.
+- If the text explicitly says a named person said or wrote a quoted statement, that attribution can be a checkable claim, but it should not override a stronger substantive claim unless the quote attribution is the real dispute.
+- Treat scam-like ads, benefit bait, grant/payout offers, miracle offers, and urgent qualification/enrollment messages as FACTUAL_CLAIM even when they look like advertisement copy.
+- If the text implies someone can qualify for hidden, new, limited-time, or little-known benefits, grants, compensation, or payouts, extract that implied claim.
 - If NO_CLAIM, leave the claim blank.
 
 Return exactly in this format:

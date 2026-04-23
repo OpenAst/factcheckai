@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -9,10 +9,10 @@ import traceback
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
-    from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link
+    from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
 except ImportError:
-    from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link
+    from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
 
 load_dotenv()
@@ -152,6 +152,29 @@ def _extract_quote_fragment(text: str, author: str = "") -> str:
     return " ".join(words[:16]).strip()
 
 
+def _extract_attribution_claim(text: str, author: str = "") -> str:
+    normalized = _normalize_space(text)
+    if not normalized or not author:
+        return ""
+
+    quote_match = re.search(r'["“]([^"”]{4,180})["”]', normalized)
+    if quote_match:
+        quote_text = _normalize_space(quote_match.group(1))
+        return f'{author} said "{quote_text}"'
+
+    calling_match = re.search(
+        r"\b(calling|called|calls)\s+([A-Z][A-Za-z.\s]{1,60}?)\s+(?:a|an)\s+['\"“]?([^'\"”]{3,120})['\"”]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if calling_match:
+        target = _normalize_space(calling_match.group(2))
+        descriptor = _normalize_space(calling_match.group(3))
+        return f'{author} called {target} "{descriptor}"'
+
+    return ""
+
+
 def _looks_like_attributed_post(text: str) -> bool:
     if not text:
         return False
@@ -191,6 +214,96 @@ def _should_prioritize_authorship(text: str, extracted_claim: str, suspected_aut
     return False
 
 
+def _detect_scam_like_claim(text: str) -> Optional[Dict[str, str]]:
+    normalized = _normalize_space(text).lower()
+    if not normalized:
+        return None
+
+    benefit_terms = [
+        "benefit", "benefits", "qualify", "eligible", "eligibility",
+        "widow", "widows", "veteran", "veterans", "compensation",
+        "grant", "grants", "payout", "claim your", "unclaimed",
+    ]
+    urgency_terms = [
+        "learn more", "enrollment closes", "before enrollment closes",
+        "act now", "tap", "limited time", "deadline", "apply now",
+        "before it closes", "don't miss", "unlocking",
+    ]
+    deception_terms = [
+        "you didn't know existed", "hidden", "most people don't know",
+        "new 2026 benefits", "ages 40-75", "ages 40–75",
+        "if you qualify", "options most widows don't know about",
+    ]
+
+    has_benefit = any(term in normalized for term in benefit_terms)
+    has_urgency = any(term in normalized for term in urgency_terms)
+    has_deception = any(term in normalized for term in deception_terms)
+
+    if not has_benefit:
+        return None
+    if not (has_urgency or has_deception):
+        return None
+
+    if "widow" in normalized and "veteran" in normalized:
+        claim = "Widows of veterans may qualify for legitimate new or little-known benefits through the linked offer."
+    elif "veteran" in normalized:
+        claim = "Veterans are being offered legitimate new or little-known benefits through the linked offer."
+    else:
+        claim = "The post claims people may qualify for legitimate hidden or newly available benefits through the linked offer."
+
+    if "2026" in normalized:
+        claim = claim.replace("benefits", "2026 benefits", 1)
+    if "40-75" in normalized or "40–75" in normalized:
+        claim = claim.replace("Veterans", "Veterans ages 40-75", 1)
+
+    return {
+        "status": "factual_claim",
+        "claim": claim,
+        "reason": "This promotional post makes implied eligibility or benefit claims with scam-style urgency, so it should be checked as a factual claim.",
+    }
+
+
+def _extract_media_focus_text(text: str) -> str:
+    if not text:
+        return ""
+
+    normalized_text = text.replace("\r", "")
+    markers = ["All detected text:", "Text in Media:"]
+    for marker in markers:
+        if marker.lower() not in normalized_text.lower():
+            continue
+
+        lines = normalized_text.splitlines()
+        capture = False
+        captured = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                if capture and captured:
+                    break
+                continue
+
+            if line.lower().startswith(marker.lower()):
+                capture = True
+                remainder = line[len(marker):].strip()
+                if remainder:
+                    captured.append(remainder)
+                continue
+
+            if capture:
+                if re.match(r"^(content in review|transcript|creation time|link information|retry detection|fact check claim)\b", line, flags=re.IGNORECASE):
+                    break
+                captured.append(line)
+                if len(" ".join(captured)) > 350:
+                    break
+
+        focused = _normalize_space(" ".join(captured))
+        if focused:
+            return focused
+
+    return ""
+
+
 def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]:
     def _dedupe(items: List[str]) -> List[str]:
         seen = set()
@@ -213,10 +326,17 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     queries.append(f"{extracted_claim} fact check")
     queries.append(f"{extracted_claim} false misleading evidence")
 
+    scam_like = _detect_scam_like_claim(f"{original_text}\n{extracted_claim}")
+    if scam_like:
+        queries.append(f"{extracted_claim} scam false warning")
+
+    attribution_claim = _extract_attribution_claim(original_text, suspected_author)
     if _looks_like_attributed_post(original_text) and suspected_author:
         if quote_fragment:
             queries.append(f'"{suspected_author}" "{quote_fragment}" news')
             queries.append(f'"{suspected_author}" "{quote_fragment}" fact check')
+        if attribution_claim and extracted_claim.strip().lower() != attribution_claim.strip().lower():
+            queries.append(f'"{suspected_author}" said news Reuters AP')
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
     return _dedupe(queries)[:3]
@@ -276,6 +396,8 @@ def _filter_credible(results, category: Optional[str] = None):
             host = ''
 
         if host:
+            if link.lower().split("?", 1)[0].split("#", 1)[0].endswith(".pdf"):
+                continue
             skip = False
             for b in blacklist:
                 if host == b or host.endswith('.' + b):
@@ -316,17 +438,23 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
     try:
         collected_results = []
         for query in search_queries:
-            serper_results = SerperService.search(query)
-            if serper_results:
-                collected_results.append(serper_results)
-                continue
             ddg_results = DuckDuckGoService.search(query, max_results=5)
             if ddg_results:
                 collected_results.append(ddg_results)
+                continue
+            serper_results = SerperService.search(query)
+            if serper_results:
+                collected_results.append(serper_results)
         search_results = _merge_search_results(collected_results, max_results=10)
     except Exception as e:
-        print('Primary search failed, falling back to Serper only:', e)
-        fallback_results = [SerperService.search(query) for query in search_queries]
+        print('Primary search failed, falling back to DuckDuckGo then Serper:', e)
+        fallback_results = []
+        for query in search_queries:
+            ddg_results = DuckDuckGoService.search(query, max_results=5)
+            if ddg_results:
+                fallback_results.append(ddg_results)
+                continue
+            fallback_results.append(SerperService.search(query))
         search_results = _merge_search_results(fallback_results, max_results=10)
 
     if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
@@ -353,6 +481,7 @@ def root():
         "health": "/health",
         "admin_cache": "/admin/cache",
         "admin_evidence": "/admin/evidence",
+        "admin_reviews": "/admin/reviews",
         "admin_ui": "/admin/ui",
     }
 
@@ -370,6 +499,16 @@ def admin_list_evidence(x_admin_token: Optional[str] = Header(None)):
     _require_admin(x_admin_token)
     entries = CuratedEvidenceService.list_entries()
     return {"evidence": entries}
+
+
+@app.get('/admin/reviews')
+def admin_list_reviews(
+    q: str = Query(default="", description="Search saved reviews"),
+    x_admin_token: Optional[str] = Header(None),
+):
+    _require_admin(x_admin_token)
+    entries = ReviewService.list_reviews(q)
+    return {"reviews": entries}
 
 
 @app.post('/admin/evidence')
@@ -565,7 +704,7 @@ def admin_ui():
       <div class="wrap">
         <div class="hero">
           <h1>SRT Admin</h1>
-          <p>Add curated evidence links from WhatsApp and inspect both curated evidence and cached fact-checks in one place.</p>
+          <p>Add curated evidence links from WhatsApp and inspect curated evidence, saved review decisions, and cached fact-checks in one place.</p>
           <label for="token">Admin Token</label>
           <input id="token" type="password" placeholder="Enter x-admin-token" />
           <div>
@@ -619,6 +758,15 @@ def admin_ui():
         </div>
 
         <section class="card" style="margin-top:20px;">
+          <h2>Saved Reviews</h2>
+          <p>These are the posts where a rater selected a claim, a supporting evidence link, and a verdict context to save.</p>
+          <label for="reviewSearch">Search Saved Reviews</label>
+          <input id="reviewSearch" type="text" placeholder="Search by claim, verdict, evidence URL, notes, or post text" />
+          <button id="searchReviewsBtn" class="secondary" type="button">Search Reviews</button>
+          <div id="reviewList" class="list"></div>
+        </section>
+
+        <section class="card" style="margin-top:20px;">
           <h2>Claim Cache</h2>
           <p>These are automatic fact-check results already cached by the system.</p>
           <div id="cacheList" class="list"></div>
@@ -630,7 +778,9 @@ def admin_ui():
         const topStatus = document.getElementById("topStatus");
         const formStatus = document.getElementById("formStatus");
         const evidenceList = document.getElementById("evidenceList");
+        const reviewList = document.getElementById("reviewList");
         const cacheList = document.getElementById("cacheList");
+        const reviewSearch = document.getElementById("reviewSearch");
 
         const savedToken = localStorage.getItem("srt_admin_token") || "";
         tokenInput.value = savedToken;
@@ -687,9 +837,31 @@ def admin_ui():
           `).join("") : '<div class="item">No cached fact-check results yet.</div>';
         }
 
+        async function loadReviews() {
+          const query = reviewSearch.value.trim();
+          const url = query ? `/admin/reviews?q=${encodeURIComponent(query)}` : "/admin/reviews";
+          const resp = await fetch(url, { headers: getHeaders() });
+          if (!resp.ok) throw new Error("Could not load saved reviews");
+          const data = await resp.json();
+          const items = data.reviews || [];
+          reviewList.innerHTML = items.length ? items.map(item => `
+            <div class="item">
+              <div><strong>${escapeHtml(item.extracted_claim || "No extracted claim stored")}</strong></div>
+              <div class="meta">${escapeHtml(item.system_verdict || "No verdict")} • ${escapeHtml(item.claim_status || "unknown")} • Updated ${escapeHtml(item.updated_at || item.created_at || "")}</div>
+              <div style="margin-top:8px;"><strong>Chosen evidence:</strong> <a href="${escapeHtml(item.selected_evidence_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.selected_evidence_title || item.selected_evidence_url || "Open link")}</a></div>
+              <div class="meta">${escapeHtml(item.selected_evidence_snippet || "")}</div>
+              <div style="margin-top:8px;"><strong>Post text:</strong> ${escapeHtml(item.post_text || "")}</div>
+              <div style="margin-top:8px;"><strong>Verdict markdown:</strong></div>
+              <div style="margin-top:4px; white-space:pre-wrap;">${escapeHtml(item.verdict_markdown || "")}</div>
+              <div style="margin-top:8px;"><strong>Notes:</strong> ${escapeHtml(item.notes || "")}</div>
+              <div>${(item.all_evidence || []).map(link => `<span class="pill">${escapeHtml(link.title || link.url || "Evidence link")}</span>`).join("")}</div>
+            </div>
+          `).join("") : '<div class="item">No saved reviews yet.</div>';
+        }
+
         async function refreshAll() {
           try {
-            await Promise.all([loadEvidence(), loadCache()]);
+            await Promise.all([loadEvidence(), loadReviews(), loadCache()]);
             setStatus(topStatus, "Admin data loaded.");
           } catch (err) {
             setStatus(topStatus, err.message + ". Check your admin token and make sure the backend is running.", true);
@@ -702,6 +874,10 @@ def admin_ui():
         });
 
         document.getElementById("refreshBtn").addEventListener("click", refreshAll);
+        document.getElementById("searchReviewsBtn").addEventListener("click", loadReviews);
+        reviewSearch.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") loadReviews();
+        });
 
         document.getElementById("saveEvidenceBtn").addEventListener("click", async () => {
           const payload = {
@@ -773,7 +949,10 @@ async def perform_fact_check(request: FactCheckRequest):
             verdict_md = cached_result.get("verdict_markdown")
             evidence_links_cached = cached_result.get("evidence_links", [])
             metadata = cached_result.get("metadata", {})
-            filtered_cached = [e for e in (evidence_links_cached or []) if e.get('url') and not _is_social_link(e.get('url'))]
+            filtered_cached = [
+                e for e in (evidence_links_cached or [])
+                if e.get('url') and not _is_social_link(e.get('url')) and not _is_pdf_link(e.get('url'))
+            ]
             evidence_links_resp = [
                 EvidenceLink(title=e.get("title", "Source"), url=e.get("url", ""), snippet=e.get("snippet", ""))
                 for e in filtered_cached
@@ -798,7 +977,16 @@ async def perform_fact_check(request: FactCheckRequest):
             )
 
         print("[factcheck] classifying claimability")
-        claimability = gemini_service.classify_claimability(request.text)
+        claim_source_text = _extract_media_focus_text(request.text) or request.text
+        if claim_source_text != request.text:
+            print(f"[factcheck] media-focused extraction text selected: {claim_source_text[:120]}")
+
+        scam_override = _detect_scam_like_claim(claim_source_text)
+        if scam_override:
+            print("[factcheck] scam-like claim override triggered")
+            claimability = scam_override
+        else:
+            claimability = gemini_service.classify_claimability(claim_source_text)
         claim_status = claimability.get("status", "factual_claim")
         claim_reason = claimability.get("reason", "")
 
@@ -835,10 +1023,13 @@ async def perform_fact_check(request: FactCheckRequest):
             )
 
         print("[factcheck] extracting candidate claims")
-        extracted_claims = gemini_service.extract_claims(request.text, max_claims=3)
-        fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(request.text)
+        extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=3)
+        fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(claim_source_text)
         if fallback_claim and fallback_claim not in extracted_claims:
             extracted_claims.insert(0, fallback_claim)
+        attribution_claim = _extract_attribution_claim(request.text, _extract_suspected_author(request.text))
+        if attribution_claim and attribution_claim not in extracted_claims:
+            extracted_claims.append(attribution_claim)
         extracted_claims = [claim for claim in extracted_claims if claim][:3]
 
         selected_claim = (request.selected_claim or "").strip()
@@ -865,7 +1056,7 @@ async def perform_fact_check(request: FactCheckRequest):
                     snippet=r.get("snippet", "")
                 )
                 for r in claim_results[:3]
-                if r.get("link") and not _is_social_link(r.get("link"))
+                if r.get("link") and not _is_social_link(r.get("link")) and not _is_pdf_link(r.get("link"))
             ]
             claim_options.append(ClaimOption(claim=claim, evidence_links=option_links))
 
@@ -886,7 +1077,7 @@ async def perform_fact_check(request: FactCheckRequest):
                             snippet=r.get("snippet", ""),
                         )
                         for r in claim_results_map[extracted_claim][:3]
-                        if r.get("link") and not _is_social_link(r.get("link"))
+                        if r.get("link") and not _is_social_link(r.get("link")) and not _is_pdf_link(r.get("link"))
                     ],
                 )
             )
@@ -912,7 +1103,10 @@ async def perform_fact_check(request: FactCheckRequest):
             prioritize_authorship=prioritize_authorship,
         )
 
-        safe_results = [r for r in search_results if r.get('link') and not _is_social_link(r.get('link'))]
+        safe_results = [
+            r for r in search_results
+            if r.get('link') and not _is_social_link(r.get('link')) and not _is_pdf_link(r.get('link'))
+        ]
         evidence_links = [
             EvidenceLink(
                 title=r.get("title", "Source"),

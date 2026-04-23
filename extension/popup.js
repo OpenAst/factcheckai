@@ -67,17 +67,53 @@ document.addEventListener('DOMContentLoaded', async () => {
                 target: { tabId: tab.id },
                 func: () => {
                     const allElements = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, h5, h6'));
+                    const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
 
                     function findByText(text) {
                         const entry = allElements.find(el => {
-                            const inner = el.innerText.trim().toLowerCase();
+                            const inner = normalize(el.innerText).toLowerCase();
                             return inner === text.toLowerCase();
                         });
                         if (entry && entry.nextElementSibling) {
-                            return entry.nextElementSibling.innerText.trim();
+                            return normalize(entry.nextElementSibling.innerText);
                         }
                         return null;
                     }
+
+                    function findLabeledBlock(labels) {
+                        for (const el of allElements) {
+                            const text = normalize(el.innerText);
+                            const lowered = text.toLowerCase();
+                            if (!labels.some(label => lowered === label || lowered.startsWith(label + ':'))) {
+                                continue;
+                            }
+
+                            const next = el.nextElementSibling ? normalize(el.nextElementSibling.innerText) : '';
+                            if (next && next.length > 15) return next;
+
+                            const parentText = el.parentElement ? normalize(el.parentElement.innerText) : '';
+                            if (parentText && parentText.toLowerCase() !== lowered) {
+                                const stripped = parentText.replace(new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:?\\s*`, 'i'), '').trim();
+                                if (stripped.length > 15) return stripped;
+                            }
+                        }
+                        return null;
+                    }
+
+                    function extractInlineLabeledText(labels) {
+                        const bodyText = normalize(document.body.innerText);
+                        for (const label of labels) {
+                            const regex = new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:?\\s*([\\s\\S]{20,500})`, 'i');
+                            const match = bodyText.match(regex);
+                            if (match && match[1]) {
+                                return normalize(match[1].split(/(?:content in review|transcript|creation time|link information)/i)[0]);
+                            }
+                        }
+                        return null;
+                    }
+
+                    const mediaText = findLabeledBlock(['all detected text', 'text in media']) || extractInlineLabeledText(['all detected text', 'text in media']);
+                    if (mediaText && mediaText.length > 15) return mediaText;
 
                     // 1. Priority: "Content In Review"
                     const inReview = findByText("Content In Review");

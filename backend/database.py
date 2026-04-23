@@ -263,3 +263,66 @@ class ReviewService:
         conn.commit()
         conn.close()
         return post_hash
+
+    @staticmethod
+    def list_reviews(query: str = ""):
+        import json
+
+        conn = _get_connection()
+        cursor = conn.cursor()
+
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            like = f"%{normalized_query}%"
+            cursor.execute(
+                """
+                SELECT id, post_hash, post_text, extracted_claim, claim_status, system_verdict,
+                       verdict_markdown, selected_evidence_url, selected_evidence_title,
+                       selected_evidence_snippet, all_evidence_json, notes, created_at, updated_at
+                FROM factcheck_reviews
+                WHERE post_text LIKE ?
+                   OR extracted_claim LIKE ?
+                   OR system_verdict LIKE ?
+                   OR selected_evidence_url LIKE ?
+                   OR selected_evidence_title LIKE ?
+                   OR notes LIKE ?
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                """,
+                (like, like, like, like, like, like),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, post_hash, post_text, extracted_claim, claim_status, system_verdict,
+                       verdict_markdown, selected_evidence_url, selected_evidence_title,
+                       selected_evidence_snippet, all_evidence_json, notes, created_at, updated_at
+                FROM factcheck_reviews
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                """
+            )
+
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for row in rows:
+            try:
+                all_evidence = json.loads(row[10]) if row[10] else []
+            except Exception:
+                all_evidence = []
+            out.append({
+                "id": row[0],
+                "post_hash": row[1],
+                "post_text": row[2] or "",
+                "extracted_claim": row[3] or "",
+                "claim_status": row[4] or "",
+                "system_verdict": row[5] or "",
+                "verdict_markdown": row[6] or "",
+                "selected_evidence_url": row[7] or "",
+                "selected_evidence_title": row[8] or "",
+                "selected_evidence_snippet": row[9] or "",
+                "all_evidence": all_evidence,
+                "notes": row[11] or "",
+                "created_at": row[12] or "",
+                "updated_at": row[13] or "",
+            })
+        return out
