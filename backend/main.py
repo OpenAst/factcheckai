@@ -11,9 +11,11 @@ from dotenv import load_dotenv
 try:
     from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
+    from .ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 except ImportError:
     from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
+    from ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 
 load_dotenv()
 
@@ -79,6 +81,18 @@ class ReviewSelectionRequest(BaseModel):
     selected_evidence_snippet: str = ""
     evidence_links: List[EvidenceLink] = []
     notes: str = ""
+
+
+class OcrJobRequest(BaseModel):
+    image_data: str
+    source_hint: str = ""
+
+
+class OcrJobResponse(BaseModel):
+    job_id: str
+    status: str
+    result_text: str = ""
+    error: str = ""
 
 gemini_service = GeminiService()
 
@@ -499,6 +513,37 @@ def admin_list_evidence(x_admin_token: Optional[str] = Header(None)):
     _require_admin(x_admin_token)
     entries = CuratedEvidenceService.list_entries()
     return {"evidence": entries}
+
+
+@app.post("/ocr/jobs", response_model=OcrJobResponse)
+def create_ocr_job(payload: OcrJobRequest):
+    if not payload.image_data.strip():
+        raise HTTPException(status_code=400, detail="image_data is required")
+    if not is_ocr_queue_available():
+        raise HTTPException(status_code=503, detail="OCR queue is not configured")
+
+    job_id = submit_ocr_job(
+        payload.image_data.strip(),
+        metadata={"source_hint": payload.source_hint.strip()},
+    )
+    return OcrJobResponse(job_id=job_id, status="queued")
+
+
+@app.get("/ocr/jobs/{job_id}", response_model=OcrJobResponse)
+def read_ocr_job(job_id: str):
+    if not is_ocr_queue_available():
+        raise HTTPException(status_code=503, detail="OCR queue is not configured")
+
+    job = get_ocr_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="OCR job not found")
+
+    return OcrJobResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        result_text=job.get("result_text", ""),
+        error=job.get("error", ""),
+    )
 
 
 @app.get('/admin/reviews')

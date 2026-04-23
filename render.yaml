@@ -1,4 +1,9 @@
 services:
+  - type: keyvalue
+    name: srt-factcheck-queue
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+
   - type: web
     name: srt-factcheck-api
     runtime: python
@@ -13,3 +18,38 @@ services:
         sync: false
       - key: SERPER_API_KEY
         sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: srt-factcheck-queue
+          property: connectionString
+      - key: OCR_QUEUE_NAME
+        value: ocr_jobs
+      - key: OCR_JOB_TTL_SECONDS
+        value: "1800"
+
+  - type: worker
+    name: srt-factcheck-ocr-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m backend.ocr_worker
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: srt-factcheck-queue
+          property: connectionString
+      - key: OCR_QUEUE_NAME
+        value: ocr_jobs
+      - key: OCR_JOB_TTL_SECONDS
+        value: "1800"
+      - key: EASYOCR_LANGS
+        value: en
+      - key: OCR_MAX_IMAGE_DIMENSION
+        value: "1600"
+      - key: OCR_DOWNLOAD_MODELS
+        value: "true"
+      - key: EASYOCR_MODEL_DIR
+        value: /opt/render/project/src/storage/easyocr

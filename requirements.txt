@@ -6,3 +6,7 @@ requests
 gunicorn
 python-dotenv
 ddgs
+redis
+easyocr
+Pillow
+numpy

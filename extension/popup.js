@@ -1,5 +1,6 @@
 // Configure your backend URL here (e.g., https://your-app.onrender.com/factcheck)
 const BACKEND_URL = 'https://factcheckai-api.onrender.com/factcheck';
+const OCR_JOBS_URL = 'https://factcheckai-api.onrender.com/ocr/jobs';
 
 document.addEventListener('DOMContentLoaded', async () => {
     const cacheBadge = document.getElementById('cache-badge');
@@ -7,6 +8,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
+    const scanImageBtn = document.getElementById('scan-image-btn');
     const checkBtn = document.getElementById('check-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
@@ -153,11 +155,86 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
+    async function pollOcrJob(jobId, maxAttempts = 25) {
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const response = await fetch(`${OCR_JOBS_URL}/${jobId}`);
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (_) {}
+
+            if (!response.ok) {
+                throw new Error(data.detail || data.error || 'Could not read OCR job');
+            }
+
+            if (data.status === 'completed') {
+                return data.result_text || '';
+            }
+            if (data.status === 'failed') {
+                throw new Error(data.error || 'OCR job failed');
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        throw new Error('OCR job timed out');
+    }
+
+    async function scanImageText() {
+        detectedTextDiv.value = 'Capturing image for OCR...';
+        checkBtn.disabled = true;
+        scanImageBtn.disabled = true;
+        currentSelectedClaim = '';
+        saveReviewStatus.style.display = 'none';
+
+        try {
+            const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+            const submitResponse = await fetch(OCR_JOBS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image_data: dataUrl,
+                    source_hint: 'extension-visible-tab'
+                })
+            });
+
+            let submitData = {};
+            try {
+                submitData = await submitResponse.json();
+            } catch (_) {}
+
+            if (!submitResponse.ok) {
+                throw new Error(submitData.detail || 'Could not submit OCR job');
+            }
+
+            detectedTextDiv.value = 'Worker is reading image text...';
+            const ocrText = await pollOcrJob(submitData.job_id);
+
+            if (ocrText && ocrText.trim()) {
+                extractedText = `All detected text:\n${ocrText.trim()}`;
+                detectedTextDiv.value = extractedText;
+                checkBtn.disabled = false;
+                setMiniStatus('Image text extracted with EasyOCR worker.');
+            } else {
+                detectedTextDiv.value = 'No text found in the image. You can still paste text manually.';
+                checkBtn.disabled = false;
+                setMiniStatus('No text was detected in the captured image.', true);
+            }
+        } catch (err) {
+            detectedTextDiv.value = 'Image scan failed. You can still paste text manually.';
+            checkBtn.disabled = false;
+            setMiniStatus(err.message || 'Image scan failed.', true);
+        } finally {
+            scanImageBtn.disabled = false;
+        }
+    }
+
     // Initial extraction
     tryExtract();
 
     // Retry button listener
     retryBtn.addEventListener('click', tryExtract);
+    scanImageBtn.addEventListener('click', scanImageText);
 
     // 2. Click handler for check button
     checkBtn.addEventListener('click', async () => {
