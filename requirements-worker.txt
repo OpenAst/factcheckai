@@ -5,6 +5,11 @@ numpy
 opencv-python-headless
 scipy
 scikit-image
+lazy_loader
+imageio
+tifffile
+networkx
+packaging
 python-bidi
 PyYAML
 Shapely
