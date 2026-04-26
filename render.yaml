@@ -31,7 +31,7 @@ services:
   - type: worker
     name: srt-factcheck-ocr-worker
     runtime: python
-    buildCommand: pip install -r requirements-worker.txt
+    buildCommand: pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.0 torchvision==0.22.0 && pip install --no-deps -r requirements-worker.txt
     startCommand: python -m backend.ocr_worker
     envVars:
       - key: PYTHON_VERSION
