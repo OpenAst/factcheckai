@@ -7,7 +7,7 @@ services:
   - type: web
     name: srt-factcheck-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-web.txt
     startCommand: gunicorn -k uvicorn.workers.UvicornWorker backend.main:app --bind 0.0.0.0:$PORT --timeout 90
     envVars:
       - key: PYTHON_VERSION
@@ -31,7 +31,7 @@ services:
   - type: worker
     name: srt-factcheck-ocr-worker
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-worker.txt
     startCommand: python -m backend.ocr_worker
     envVars:
       - key: PYTHON_VERSION

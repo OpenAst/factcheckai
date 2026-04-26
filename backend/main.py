@@ -96,7 +96,7 @@ class OcrJobResponse(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-04-18-gemini-text-v2"
+CACHE_VERSION = "2026-04-25-always-extract-claims"
 
 # Admin token for simple auth on cache listing endpoint
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
@@ -1021,55 +1021,23 @@ async def perform_fact_check(request: FactCheckRequest):
                 claim_reason=metadata.get("claim_reason", ""),
             )
 
-        print("[factcheck] classifying claimability")
+        print("[factcheck] preparing claim extraction")
         claim_source_text = _extract_media_focus_text(request.text) or request.text
         if claim_source_text != request.text:
             print(f"[factcheck] media-focused extraction text selected: {claim_source_text[:120]}")
 
+        claim_status = "factual_claim"
+        claim_reason = ""
         scam_override = _detect_scam_like_claim(claim_source_text)
         if scam_override:
             print("[factcheck] scam-like claim override triggered")
-            claimability = scam_override
+            fallback_claim = scam_override.get("claim", "").strip()
+            claim_reason = scam_override.get("reason", "")
         else:
-            claimability = gemini_service.classify_claimability(claim_source_text)
-        claim_status = claimability.get("status", "factual_claim")
-        claim_reason = claimability.get("reason", "")
-
-        if claim_status == "no_claim":
-            result_md = (
-                "**Verdict**: No Claim\n\n"
-                f"**Summary**: {claim_reason or 'This post does not contain a specific factual claim that needs fact-checking.'}\n\n"
-                "**Key Points**:\n"
-                "- The content is mainly opinion, commentary, rhetoric, or personal expression.\n"
-                "- There is no single concrete factual assertion to verify against news or primary evidence.\n"
-                "- No web fact-check search was run because this item is not a checkable claim.\n\n"
-                "**Date Check**: Not applicable."
-            )
-            CacheService.save_to_cache(
-                request.text,
-                result_md,
-                [],
-                metadata={
-                    "cache_version": CACHE_VERSION,
-                    "extracted_claim": "",
-                    "extracted_claims": [],
-                    "claim_options": [],
-                    "claim_status": claim_status,
-                    "claim_reason": claim_reason,
-                },
-            )
-            return FactCheckResponse(
-                verdict_md=result_md,
-                extracted_claim="",
-                evidence_links=[],
-                is_cached=False,
-                claim_status=claim_status,
-                claim_reason=claim_reason,
-            )
+            fallback_claim = gemini_service.extract_claim(claim_source_text)
 
         print("[factcheck] extracting candidate claims")
         extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=3)
-        fallback_claim = claimability.get("claim", "").strip() or gemini_service.extract_claim(claim_source_text)
         if fallback_claim and fallback_claim not in extracted_claims:
             extracted_claims.insert(0, fallback_claim)
         attribution_claim = _extract_attribution_claim(request.text, _extract_suspected_author(request.text))
