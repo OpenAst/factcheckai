@@ -26,6 +26,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         saveReviewStatus.style.color = isError ? '#8a1f17' : '#2c3e50';
     }
 
+    function formatError(err) {
+        if (!err) return 'Unknown error';
+        if (typeof err === 'string') return err;
+        return err.message || String(err);
+    }
+
     async function saveSelectedEvidence(link) {
         if (!currentFactCheckData) {
             setMiniStatus('No fact-check result is loaded yet.', true);
@@ -186,9 +192,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         scanImageBtn.disabled = true;
         currentSelectedClaim = '';
         saveReviewStatus.style.display = 'none';
+        let stage = 'starting';
 
         try {
-            const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+            stage = 'capturing visible tab';
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            const dataUrl = await chrome.tabs.captureVisibleTab(tab?.windowId, { format: 'png' });
+            if (!dataUrl) {
+                throw new Error('captureVisibleTab returned no image data');
+            }
+
+            stage = 'submitting OCR job';
             const submitResponse = await fetch(OCR_JOBS_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -204,10 +218,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (_) {}
 
             if (!submitResponse.ok) {
-                throw new Error(submitData.detail || 'Could not submit OCR job');
+                throw new Error(`HTTP ${submitResponse.status}: ${submitData.detail || 'Could not submit OCR job'}`);
             }
 
             detectedTextDiv.value = 'Worker is reading image text...';
+            stage = `polling OCR job ${submitData.job_id}`;
             const ocrText = await pollOcrJob(submitData.job_id);
 
             if (ocrText && ocrText.trim()) {
@@ -221,9 +236,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setMiniStatus('No text was detected in the captured image.', true);
             }
         } catch (err) {
+            console.error('[ocr] image scan failed', { stage, error: err });
             detectedTextDiv.value = 'Image scan failed. You can still paste text manually.';
             checkBtn.disabled = false;
-            setMiniStatus(err.message || 'Image scan failed.', true);
+            setMiniStatus(`Image scan failed at ${stage}: ${formatError(err)}`, true);
         } finally {
             scanImageBtn.disabled = false;
         }

@@ -517,6 +517,7 @@ def admin_list_evidence(x_admin_token: Optional[str] = Header(None)):
 
 @app.post("/ocr/jobs", response_model=OcrJobResponse)
 def create_ocr_job(payload: OcrJobRequest):
+    print(f"[ocr-api] create job request source_hint={payload.source_hint!r} image_chars={len(payload.image_data or '')}")
     if not payload.image_data.strip():
         raise HTTPException(status_code=400, detail="image_data is required")
     if not is_ocr_queue_available():
@@ -526,18 +527,22 @@ def create_ocr_job(payload: OcrJobRequest):
         payload.image_data.strip(),
         metadata={"source_hint": payload.source_hint.strip()},
     )
+    print(f"[ocr-api] queued job_id={job_id}")
     return OcrJobResponse(job_id=job_id, status="queued")
 
 
 @app.get("/ocr/jobs/{job_id}", response_model=OcrJobResponse)
 def read_ocr_job(job_id: str):
+    print(f"[ocr-api] read job_id={job_id}")
     if not is_ocr_queue_available():
         raise HTTPException(status_code=503, detail="OCR queue is not configured")
 
     job = get_ocr_job(job_id)
     if not job:
+        print(f"[ocr-api] job not found job_id={job_id}")
         raise HTTPException(status_code=404, detail="OCR job not found")
 
+    print(f"[ocr-api] job status job_id={job_id} status={job['status']}")
     return OcrJobResponse(
         job_id=job["job_id"],
         status=job["status"],
