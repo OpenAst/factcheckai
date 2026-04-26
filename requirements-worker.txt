@@ -1,5 +1,13 @@
 python-dotenv
 redis
-easyocr
 Pillow
 numpy
+opencv-python-headless
+scipy
+scikit-image
+python-bidi
+PyYAML
+Shapely
+pyclipper
+ninja
+easyocr
