@@ -1,10 +1,13 @@
 import sqlite3
 import os
 
-DB_PATH = "cache.db"
+DB_PATH = os.getenv("CACHE_DB_PATH", "cache.db")
 
 
 def _get_connection():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 

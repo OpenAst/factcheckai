@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.agents
+.codex
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+cache.db
+backend/cache.db
+extensions.zip
+
