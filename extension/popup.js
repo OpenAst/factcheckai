@@ -1,6 +1,8 @@
-// Configure your backend URL here (e.g., https://your-app.onrender.com/factcheck)
-const BACKEND_URL = 'https://factcheckai-api.onrender.com/factcheck';
-const OCR_JOBS_URL = 'https://factcheckai-api.onrender.com/ocr/jobs';
+// Configure your backend URL here.
+// For Coolify, use the public API app URL.
+const API_BASE_URL = 'http://jxr36a5v6auepw1fgh0x2b7c.68.168.208.98.sslip.io';
+const BACKEND_URL = `${API_BASE_URL}/factcheck`;
+const OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
 
 document.addEventListener('DOMContentLoaded', async () => {
     const cacheBadge = document.getElementById('cache-badge');
@@ -30,6 +32,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!err) return 'Unknown error';
         if (typeof err === 'string') return err;
         return err.message || String(err);
+    }
+
+    async function readErrorDetail(response, fallbackMessage = 'Unknown backend error') {
+        const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
+        const contentType = response.headers.get('content-type') || '';
+        let detail = '';
+
+        try {
+            if (contentType.includes('application/json')) {
+                const errorData = await response.json();
+                detail = errorData.detail || errorData.message || JSON.stringify(errorData);
+            } else {
+                detail = await response.text();
+            }
+        } catch (err) {
+            detail = `${fallbackMessage}; could not read error body (${formatError(err)})`;
+        }
+
+        return `${status}: ${detail || fallbackMessage}`;
     }
 
     async function saveSelectedEvidence(link) {
@@ -170,7 +191,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (_) {}
 
             if (!response.ok) {
-                throw new Error(data.detail || data.error || 'Could not read OCR job');
+                throw new Error(await readErrorDetail(response, 'Could not read OCR job'));
             }
 
             if (data.status === 'completed') {
@@ -218,7 +239,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (_) {}
 
             if (!submitResponse.ok) {
-                throw new Error(`HTTP ${submitResponse.status}: ${submitData.detail || 'Could not submit OCR job'}`);
+                throw new Error(await readErrorDetail(submitResponse, 'Could not submit OCR job'));
             }
 
             detectedTextDiv.value = 'Worker is reading image text...';
@@ -278,26 +299,22 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Read current text from textarea (user might have edited it)
             const textToAnalyze = detectedTextDiv.value;
 
-            const response = await fetch(BACKEND_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: textToAnalyze,
-                    selected_claim: currentSelectedClaim || undefined
-                })
-            });
+            let response;
+            try {
+                response = await fetch(BACKEND_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: textToAnalyze,
+                        selected_claim: currentSelectedClaim || undefined
+                    })
+                });
+            } catch (err) {
+                throw new Error(`Network error calling ${BACKEND_URL}: ${formatError(err)}`);
+            }
 
             if (!response.ok) {
-                let backendDetail = response.statusText || 'Unknown backend error';
-                try {
-                    const errorData = await response.json();
-                    backendDetail = errorData.detail || errorData.message || JSON.stringify(errorData);
-                } catch (_) {
-                    try {
-                        backendDetail = await response.text();
-                    } catch (_) {}
-                }
-                throw new Error('Backend error: ' + backendDetail);
+                throw new Error(`Backend error from ${BACKEND_URL}: ${await readErrorDetail(response)}`);
             }
 
             const data = await response.json();
