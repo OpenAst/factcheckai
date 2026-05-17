@@ -30,5 +30,6 @@ ADMIN_TOKEN=...
 5. Add the environment variables above.
 6. Deploy.
 
-The compose file creates persistent volumes for the SQLite cache, EasyOCR models, and Redis data. The OCR worker downloads EasyOCR models on first start, so the first OCR request can take longer than later requests.
+The compose file uses `expose` instead of `ports` for the API. This lets Coolify's proxy route traffic to the container without reserving host port `8000`, which avoids port allocation conflicts on shared servers.
 
+The compose file creates persistent volumes for the SQLite cache, EasyOCR models, and Redis data. The OCR worker downloads EasyOCR models on first start, so the first OCR request can take longer than later requests.

@@ -18,8 +18,8 @@ services:
     depends_on:
       redis:
         condition: service_started
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - api-data:/app/storage
     healthcheck:
@@ -64,4 +64,3 @@ volumes:
   api-data:
   worker-models:
   redis-data:
-
