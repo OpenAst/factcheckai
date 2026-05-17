@@ -1,5 +1,6 @@
 import base64
 import io
+import logging
 import os
 import time
 from typing import Optional
@@ -8,7 +9,12 @@ import easyocr
 import numpy as np
 from PIL import Image
 
+from .logging_config import configure_logging
 from .ocr_queue import get_ocr_job_payload, is_ocr_queue_available, pop_ocr_job, update_ocr_job
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 
 EASYOCR_LANGS = [lang.strip() for lang in os.getenv("EASYOCR_LANGS", "en").split(",") if lang.strip()]
@@ -22,7 +28,11 @@ _reader: Optional[easyocr.Reader] = None
 def _get_reader() -> easyocr.Reader:
     global _reader
     if _reader is None:
-        print(f"[ocr-worker] Initializing EasyOCR reader langs={EASYOCR_LANGS} model_dir={EASYOCR_MODEL_DIR or 'default'}")
+        logger.info(
+            "initializing EasyOCR reader langs=%s model_dir=%s",
+            EASYOCR_LANGS,
+            EASYOCR_MODEL_DIR or "default",
+        )
         _reader = easyocr.Reader(
             EASYOCR_LANGS,
             gpu=False,
@@ -69,7 +79,7 @@ def run_worker() -> None:
     if not is_ocr_queue_available():
         raise RuntimeError("REDIS_URL is required for the OCR worker")
 
-    print("[ocr-worker] Worker started")
+    logger.info("ocr worker started")
     while True:
         job_id = pop_ocr_job(timeout=5)
         if not job_id:
@@ -85,14 +95,14 @@ def run_worker() -> None:
             continue
 
         try:
-            print(f"[ocr-worker] Processing job {job_id}")
+            logger.info("ocr job processing job_id=%s", job_id)
             update_ocr_job(job_id, status="processing")
             result_text = _extract_text(image_data)
             update_ocr_job(job_id, status="completed", result_text=result_text)
-            print(f"[ocr-worker] Completed job {job_id} chars={len(result_text)}")
+            logger.info("ocr job completed job_id=%s result_chars=%s", job_id, len(result_text))
         except Exception as exc:
             update_ocr_job(job_id, status="failed", error=str(exc))
-            print(f"[ocr-worker] Job {job_id} failed: {exc}")
+            logger.exception("ocr job failed job_id=%s error=%s", job_id, exc)
             time.sleep(1)
 
 

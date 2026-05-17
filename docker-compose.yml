@@ -5,6 +5,7 @@ services:
       target: web
     environment:
       PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CACHE_DB_PATH: /app/storage/cache.db
       REDIS_URL: redis://redis:6379/0
       OCR_QUEUE_NAME: ocr_jobs
@@ -40,6 +41,7 @@ services:
       target: worker
     environment:
       REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OCR_QUEUE_NAME: ocr_jobs
       OCR_JOB_TTL_SECONDS: 1800
       EASYOCR_LANGS: en

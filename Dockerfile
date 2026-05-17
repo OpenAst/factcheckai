@@ -21,7 +21,8 @@ COPY requirements-web.txt ./
 RUN pip install -r requirements-web.txt
 COPY backend ./backend
 
-ENV PORT=8000 \
+ENV LOG_LEVEL=INFO \
+    PORT=8000 \
     CACHE_DB_PATH=/app/storage/cache.db
 
 EXPOSE 8000
@@ -36,7 +37,8 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.0 to
     && pip install --no-deps -r requirements-worker.txt
 COPY backend ./backend
 
-ENV EASYOCR_LANGS=en \
+ENV LOG_LEVEL=INFO \
+    EASYOCR_LANGS=en \
     OCR_MAX_IMAGE_DIMENSION=1600 \
     OCR_DOWNLOAD_MODELS=true \
     EASYOCR_MODEL_DIR=/app/storage/easyocr

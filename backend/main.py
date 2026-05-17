@@ -1,30 +1,69 @@
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import re
 import os
-import traceback
+import logging
+import time
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
+    from .logging_config import configure_logging
     from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
     from .ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 except ImportError:
+    from logging_config import configure_logging
     from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
     from ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 
 load_dotenv()
+configure_logging()
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
+    logger.info("starting application")
     init_db()
+    logger.info("database initialized")
     yield
+    logger.info("stopping application")
 
 app = FastAPI(lifespan=lifespan, title="SRT Fact-Check AI API")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started_at = time.perf_counter()
+    method = request.method
+    path = request.url.path
+    client = request.client.host if request.client else "unknown"
+    logger.info("request started method=%s path=%s client=%s", method, path, client)
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.exception(
+            "request failed method=%s path=%s client=%s duration_ms=%.2f",
+            method,
+            path,
+            client,
+            duration_ms,
+        )
+        raise
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        "request completed method=%s path=%s client=%s status_code=%s duration_ms=%.2f",
+        method,
+        path,
+        client,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 # Enable CORS for the Chrome Extension
 app.add_middleware(
@@ -461,7 +500,7 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
                 collected_results.append(serper_results)
         search_results = _merge_search_results(collected_results, max_results=10)
     except Exception as e:
-        print('Primary search failed, falling back to DuckDuckGo then Serper:', e)
+        logger.warning("primary search failed, falling back to DuckDuckGo then Serper: %s", e)
         fallback_results = []
         for query in search_queries:
             ddg_results = DuckDuckGoService.search(query, max_results=5)
@@ -472,7 +511,7 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
         search_results = _merge_search_results(fallback_results, max_results=10)
 
     if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
-        print(f"Authorship-sensitive search triggered for claim: {claim_text}")
+        logger.info("authorship-sensitive search triggered claim=%r", claim_text)
 
     return _filter_credible(search_results, category=category)
 
@@ -517,7 +556,11 @@ def admin_list_evidence(x_admin_token: Optional[str] = Header(None)):
 
 @app.post("/ocr/jobs", response_model=OcrJobResponse)
 def create_ocr_job(payload: OcrJobRequest):
-    print(f"[ocr-api] create job request source_hint={payload.source_hint!r} image_chars={len(payload.image_data or '')}")
+    logger.info(
+        "ocr job create requested source_hint=%r image_chars=%s",
+        payload.source_hint,
+        len(payload.image_data or ""),
+    )
     if not payload.image_data.strip():
         raise HTTPException(status_code=400, detail="image_data is required")
     if not is_ocr_queue_available():
@@ -527,22 +570,22 @@ def create_ocr_job(payload: OcrJobRequest):
         payload.image_data.strip(),
         metadata={"source_hint": payload.source_hint.strip()},
     )
-    print(f"[ocr-api] queued job_id={job_id}")
+    logger.info("ocr job queued job_id=%s", job_id)
     return OcrJobResponse(job_id=job_id, status="queued")
 
 
 @app.get("/ocr/jobs/{job_id}", response_model=OcrJobResponse)
 def read_ocr_job(job_id: str):
-    print(f"[ocr-api] read job_id={job_id}")
+    logger.info("ocr job read requested job_id=%s", job_id)
     if not is_ocr_queue_available():
         raise HTTPException(status_code=503, detail="OCR queue is not configured")
 
     job = get_ocr_job(job_id)
     if not job:
-        print(f"[ocr-api] job not found job_id={job_id}")
+        logger.warning("ocr job not found job_id=%s", job_id)
         raise HTTPException(status_code=404, detail="OCR job not found")
 
-    print(f"[ocr-api] job status job_id={job_id} status={job['status']}")
+    logger.info("ocr job status job_id=%s status=%s", job_id, job["status"])
     return OcrJobResponse(
         job_id=job["job_id"],
         status=job["status"],
@@ -972,9 +1015,10 @@ async def perform_fact_check(request: FactCheckRequest):
         if not request.text:
             raise HTTPException(status_code=400, detail="Empty text provided")
 
-        print(
-            f"[factcheck] start text_chars={len(request.text)} "
-            f"selected_claim={'yes' if request.selected_claim else 'no'}"
+        logger.info(
+            "factcheck start text_chars=%s selected_claim=%s",
+            len(request.text),
+            "yes" if request.selected_claim else "no",
         )
 
         # 0. Check cache
@@ -985,17 +1029,19 @@ async def perform_fact_check(request: FactCheckRequest):
             metadata = cached_result.get("metadata", {})
             cache_version = metadata.get("cache_version")
             if cache_version != CACHE_VERSION:
-                print(
-                    f"Skipping stale cache for: {request.text[:50]}... "
-                    f"(cached version={cache_version}, expected={CACHE_VERSION})"
+                logger.info(
+                    "skipping stale cache text_preview=%r cached_version=%s expected_version=%s",
+                    request.text[:50],
+                    cache_version,
+                    CACHE_VERSION,
                 )
                 cached_result = None
             elif verdict_md and ("AI error" in verdict_md or "Fact-checking error" in verdict_md):
-                print(f"Skipping cached error result for: {request.text[:50]}...")
+                logger.info("skipping cached error result text_preview=%r", request.text[:50])
                 cached_result = None
 
         if cached_result:
-            print(f"[factcheck] cache hit for: {request.text[:50]}...")
+            logger.info("factcheck cache hit text_preview=%r", request.text[:50])
             verdict_md = cached_result.get("verdict_markdown")
             evidence_links_cached = cached_result.get("evidence_links", [])
             metadata = cached_result.get("metadata", {})
@@ -1026,22 +1072,22 @@ async def perform_fact_check(request: FactCheckRequest):
                 claim_reason=metadata.get("claim_reason", ""),
             )
 
-        print("[factcheck] preparing claim extraction")
+        logger.info("factcheck preparing claim extraction")
         claim_source_text = _extract_media_focus_text(request.text) or request.text
         if claim_source_text != request.text:
-            print(f"[factcheck] media-focused extraction text selected: {claim_source_text[:120]}")
+            logger.info("factcheck media-focused extraction selected text_preview=%r", claim_source_text[:120])
 
         claim_status = "factual_claim"
         claim_reason = ""
         scam_override = _detect_scam_like_claim(claim_source_text)
         if scam_override:
-            print("[factcheck] scam-like claim override triggered")
+            logger.info("factcheck scam-like claim override triggered")
             fallback_claim = scam_override.get("claim", "").strip()
             claim_reason = scam_override.get("reason", "")
         else:
             fallback_claim = gemini_service.extract_claim(claim_source_text)
 
-        print("[factcheck] extracting candidate claims")
+        logger.info("factcheck extracting candidate claims")
         extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=3)
         if fallback_claim and fallback_claim not in extracted_claims:
             extracted_claims.insert(0, fallback_claim)
@@ -1055,12 +1101,12 @@ async def perform_fact_check(request: FactCheckRequest):
             extracted_claim = selected_claim
         else:
             extracted_claim = extracted_claims[0] if extracted_claims else fallback_claim
-        print(f"[factcheck] active claim: {extracted_claim}")
+        logger.info("factcheck active claim=%r", extracted_claim)
 
         suspected_author = _extract_suspected_author(request.text)
         prioritize_authorship = _should_prioritize_authorship(request.text, extracted_claim, suspected_author)
 
-        print("[factcheck] gathering search results")
+        logger.info("factcheck gathering search results")
         claim_options = []
         claim_results_map = {}
         preview_claims = extracted_claims[:2]
@@ -1112,7 +1158,7 @@ async def perform_fact_check(request: FactCheckRequest):
 
         search_results = claim_results_map.get(extracted_claim, [])
 
-        print(f"[factcheck] generating verdict using {len(search_results)} search results")
+        logger.info("factcheck generating verdict search_result_count=%s", len(search_results))
         result_md = gemini_service.fact_check(
             extracted_claim,
             search_results,
@@ -1139,7 +1185,7 @@ async def perform_fact_check(request: FactCheckRequest):
         ]
 
         if "Fact-checking error" not in result_md and "AI error" not in result_md:
-            print("[factcheck] saving successful result to cache")
+            logger.info("factcheck saving successful result to cache")
             CacheService.save_to_cache(
                 request.text,
                 result_md,
@@ -1163,7 +1209,7 @@ async def perform_fact_check(request: FactCheckRequest):
                 },
             )
 
-        print("[factcheck] completed successfully")
+        logger.info("factcheck completed successfully")
         return FactCheckResponse(
             verdict_md=result_md,
             extracted_claim=extracted_claim,
@@ -1177,8 +1223,7 @@ async def perform_fact_check(request: FactCheckRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"[factcheck] unhandled error: {exc}")
-        print(traceback.format_exc())
+        logger.exception("factcheck unhandled error: %s", exc)
         raise HTTPException(status_code=500, detail=f"Fact-check pipeline failed: {exc}")
 
 if __name__ == "__main__":

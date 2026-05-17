@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+import logging
 from google import genai
 from groq import Groq
 from typing import List, Dict
@@ -17,8 +18,14 @@ except Exception:
         from duckduckgo_search import DDGS
     except Exception:
         DDGS = None
+try:
+    from .logging_config import configure_logging
+except ImportError:
+    from logging_config import configure_logging
 
 load_dotenv()
+configure_logging()
+logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -179,7 +186,7 @@ def _load_guidance_chunks() -> List[Dict[str, str]]:
 
     chunks = []
     if PdfReader is None:
-        print("[guidance] pypdf not available; project guidance PDFs will not be loaded")
+        logger.warning("pypdf not available; project guidance PDFs will not be loaded")
         _GUIDANCE_CACHE = chunks
         return chunks
 
@@ -194,9 +201,9 @@ def _load_guidance_chunks() -> List[Dict[str, str]]:
                 continue
             chunks.extend(_chunk_guidance_text(os.path.basename(path), combined))
         except Exception as exc:
-            print(f"[guidance] Failed to load {path}: {exc}")
+            logger.warning("failed to load guidance PDF path=%s error=%s", path, exc)
 
-    print(f"[guidance] Loaded {len(chunks)} guidance chunks from {len(_guidance_paths())} PDF(s)")
+    logger.info("loaded guidance chunks chunk_count=%s pdf_count=%s", len(chunks), len(_guidance_paths()))
     _GUIDANCE_CACHE = chunks
     return chunks
 
@@ -252,7 +259,7 @@ class SerperService:
             ]
             return filter_search_results(parsed)
         except Exception as e:
-            print(f"Serper search error: {e}")
+            logger.warning("Serper search error query=%r error=%s", query, e)
             return []
 
 
@@ -263,7 +270,7 @@ class DuckDuckGoService:
         Returns list of dicts with keys: title, link, snippet
         """
         if DDGS is None:
-            print('DDGS search package not available')
+            logger.warning("DDGS search package not available")
             return []
         try:
             results = DDGS().text(query, max_results=max_results)
@@ -276,7 +283,7 @@ class DuckDuckGoService:
                 })
             return filter_search_results(out)
         except Exception as e:
-            print('DuckDuckGo search error:', e)
+            logger.warning("DuckDuckGo search error query=%r error=%s", query, e)
             return []
 
 class GeminiService:
@@ -292,7 +299,7 @@ class GeminiService:
         last_error = None
         for model_name in GROQ_MODELS:
             try:
-                print(f"Trying Groq model: {model_name}")
+                logger.info("trying Groq model=%s", model_name)
                 attempted_models.append(model_name)
                 response = self.groq_client.chat.completions.create(
                     model=model_name,
@@ -303,7 +310,7 @@ class GeminiService:
                 return content or ""
             except Exception as e:
                 last_error = str(e)
-                print(f"Groq model {model_name} failed: {last_error}")
+                logger.warning("Groq model failed model=%s error=%s", model_name, last_error)
                 continue
         attempted = ", ".join(attempted_models) if attempted_models else "none"
         raise Exception(f"All Groq models failed after trying [{attempted}]. Last error: {last_error}")
@@ -316,7 +323,7 @@ class GeminiService:
         last_error = None
         for model_name in GEMINI_MODELS:
             try:
-                print(f"Trying Gemini model: {model_name}")
+                logger.info("trying Gemini model=%s", model_name)
                 attempted_models.append(model_name)
                 response = self.gemini_client.models.generate_content(
                     model=model_name,
@@ -325,7 +332,7 @@ class GeminiService:
                 return getattr(response, "text", "") or ""
             except Exception as e:
                 last_error = str(e)
-                print(f"Gemini model {model_name} failed: {last_error}")
+                logger.warning("Gemini model failed model=%s error=%s", model_name, last_error)
                 continue
         attempted = ", ".join(attempted_models) if attempted_models else "none"
         raise Exception(f"All Gemini models failed after trying [{attempted}]. Last error: {last_error}")
@@ -335,7 +342,7 @@ class GeminiService:
         try:
             return self._call_groq(prompt)
         except Exception as groq_err:
-            print(f"Groq failed, falling back to Gemini: {groq_err}")
+            logger.warning("Groq failed, falling back to Gemini: %s", groq_err)
             try:
                 return self._call_gemini(prompt)
             except Exception as gemini_err:

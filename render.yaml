@@ -12,6 +12,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
+      - key: LOG_LEVEL
+        value: INFO
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
@@ -36,6 +38,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
+      - key: LOG_LEVEL
+        value: INFO
       - key: REDIS_URL
         fromService:
           type: keyvalue
