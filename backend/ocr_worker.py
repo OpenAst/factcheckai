@@ -17,9 +17,9 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
-EASYOCR_LANGS = [lang.strip() for lang in os.getenv("EASYOCR_LANGS", "en").split(",") if lang.strip()]
+EASYOCR_LANGS = [lang.strip() for lang in os.getenv("EASYOCR_LANGS", "en,uk").split(",") if lang.strip()]
 EASYOCR_MODEL_DIR = os.getenv("EASYOCR_MODEL_DIR", "").strip() or None
-OCR_MAX_IMAGE_DIMENSION = int(os.getenv("OCR_MAX_IMAGE_DIMENSION", "1600"))
+OCR_MAX_IMAGE_DIMENSION = int(os.getenv("OCR_MAX_IMAGE_DIMENSION", "1200"))
 OCR_DOWNLOAD_MODELS = os.getenv("OCR_DOWNLOAD_MODELS", "true").lower() == "true"
 
 _reader: Optional[easyocr.Reader] = None
@@ -53,14 +53,29 @@ def _decode_image(image_data: str) -> np.ndarray:
     if longest > OCR_MAX_IMAGE_DIMENSION:
         scale = OCR_MAX_IMAGE_DIMENSION / float(longest)
         image = image.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+        logger.info(
+            "ocr image resized original_width=%s original_height=%s resized_width=%s resized_height=%s",
+            width,
+            height,
+            image.size[0],
+            image.size[1],
+        )
+    else:
+        logger.info("ocr image decoded width=%s height=%s", width, height)
 
     return np.array(image)
 
 
 def _extract_text(image_data: str) -> str:
+    started_at = time.perf_counter()
     image = _decode_image(image_data)
+    logger.info("ocr image ready shape=%s decode_duration_ms=%.2f", image.shape, (time.perf_counter() - started_at) * 1000)
+    reader_started_at = time.perf_counter()
     reader = _get_reader()
+    logger.info("ocr reader ready duration_ms=%.2f", (time.perf_counter() - reader_started_at) * 1000)
+    read_started_at = time.perf_counter()
     results = reader.readtext(image, detail=0, paragraph=False)
+    logger.info("ocr readtext completed result_count=%s duration_ms=%.2f", len(results), (time.perf_counter() - read_started_at) * 1000)
     cleaned = []
     seen = set()
     for entry in results:

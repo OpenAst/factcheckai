@@ -17,4 +17,5 @@ def configure_logging() -> None:
     logging.getLogger("uvicorn.access").setLevel(level)
     logging.getLogger("uvicorn.error").setLevel(level)
     logging.getLogger("gunicorn.error").setLevel(level)
-
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("primp").setLevel(logging.WARNING)

@@ -38,8 +38,8 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.0 to
 COPY backend ./backend
 
 ENV LOG_LEVEL=INFO \
-    EASYOCR_LANGS=en \
-    OCR_MAX_IMAGE_DIMENSION=1600 \
+    EASYOCR_LANGS=en,uk \
+    OCR_MAX_IMAGE_DIMENSION=1200 \
     OCR_DOWNLOAD_MODELS=true \
     EASYOCR_MODEL_DIR=/app/storage/easyocr
 

@@ -50,9 +50,9 @@ services:
       - key: OCR_JOB_TTL_SECONDS
         value: "1800"
       - key: EASYOCR_LANGS
-        value: en
+        value: en,uk
       - key: OCR_MAX_IMAGE_DIMENSION
-        value: "1600"
+        value: "1200"
       - key: OCR_DOWNLOAD_MODELS
         value: "true"
       - key: EASYOCR_MODEL_DIR

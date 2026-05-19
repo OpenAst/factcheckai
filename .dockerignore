@@ -12,5 +12,5 @@ __pycache__
 .ruff_cache
 cache.db
 backend/cache.db
-extensions.zip
+logs
 

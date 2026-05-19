@@ -182,7 +182,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function pollOcrJob(jobId, maxAttempts = 25) {
+    async function pollOcrJob(jobId, maxAttempts = 90) {
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
             const response = await fetch(`${OCR_JOBS_URL}/${jobId}`);
             let data = {};
@@ -204,7 +204,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        throw new Error('OCR job timed out');
+        throw new Error('OCR job timed out after 3 minutes');
     }
 
     async function scanImageText() {

@@ -44,8 +44,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OCR_QUEUE_NAME: ocr_jobs
       OCR_JOB_TTL_SECONDS: 1800
-      EASYOCR_LANGS: en
-      OCR_MAX_IMAGE_DIMENSION: 1600
+      EASYOCR_LANGS: ${EASYOCR_LANGS:-en,uk}
+      OCR_MAX_IMAGE_DIMENSION: 1200
       OCR_DOWNLOAD_MODELS: "true"
       EASYOCR_MODEL_DIR: /app/storage/easyocr
     depends_on:

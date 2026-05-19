@@ -18,10 +18,12 @@ GROQ_API_KEY=...
 SERPER_API_KEY=...
 ADMIN_TOKEN=...
 LOG_LEVEL=INFO
+EASYOCR_LANGS=en,uk
 ```
 
 `ADMIN_TOKEN` is optional unless you use the admin endpoints.
 `LOG_LEVEL` is optional and defaults to `INFO`. Use `DEBUG`, `WARNING`, or `ERROR` when you want more or less log output.
+`EASYOCR_LANGS` controls OCR languages. The default `en,uk` supports English and Ukrainian; add other EasyOCR language codes only if you need them because each language can increase model size/startup time.
 
 ## Coolify Setup
 

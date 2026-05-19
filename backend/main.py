@@ -135,7 +135,25 @@ class OcrJobResponse(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-04-25-always-extract-claims"
+CACHE_VERSION = "2026-05-19-ukraine-multilingual-evidence"
+
+UKRAINIAN_NEWS_DOMAINS = [
+    "kyivindependent.com",
+    "pravda.com.ua",
+    "ukrinform.net",
+    "suspilne.media",
+    "hromadske.ua",
+    "detector.media",
+]
+
+UKRAINIAN_FACTCHECK_DOMAINS = [
+    "stopfake.org",
+    "voxukraine.org",
+    "detector.media",
+    "euvsdisinfo.eu",
+]
+
+UKRAINIAN_SOURCE_DOMAINS = UKRAINIAN_FACTCHECK_DOMAINS + UKRAINIAN_NEWS_DOMAINS
 
 # Admin token for simple auth on cache listing endpoint
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
@@ -153,6 +171,37 @@ def _require_admin(x_admin_token: Optional[str]):
 
 def _normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def _has_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[\u0400-\u04ff]", value or ""))
+
+
+def _looks_ukraine_related(value: str) -> bool:
+    lowered = (value or "").lower()
+    markers = [
+        "укра",
+        "київ",
+        "киев",
+        "зеленськ",
+        "зеленск",
+        "zelensky",
+        "zelenskyy",
+        "ukraine",
+        "ukrainian",
+        "russia",
+        "рос",
+        "війна",
+        "война",
+        "kyiv",
+        "kiev",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _is_ukraine_context(original_text: str, claim_text: str = "") -> bool:
+    combined = f"{original_text}\n{claim_text}"
+    return _has_cyrillic(combined) or _looks_ukraine_related(combined)
 
 
 def _extract_suspected_author(text: str) -> str:
@@ -376,6 +425,15 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     suspected_author = _extract_suspected_author(original_text)
     quote_fragment = _extract_quote_fragment(original_text, suspected_author)
 
+    is_ukraine_context = _is_ukraine_context(original_text, extracted_claim)
+
+    if is_ukraine_context:
+        for domain in UKRAINIAN_FACTCHECK_DOMAINS:
+            queries.append(f"{extracted_claim} site:{domain}")
+        queries.append(f"{extracted_claim} StopFake VoxCheck Детектор медіа")
+        queries.append(f"{extracted_claim} фактчек")
+        queries.append(f"{extracted_claim} фейк перевірка фактів")
+        queries.append(f"{extracted_claim} українські новини")
     queries.append(f"{extracted_claim} fact check")
     queries.append(f"{extracted_claim} false misleading evidence")
 
@@ -392,7 +450,7 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             queries.append(f'"{suspected_author}" said news Reuters AP')
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
-    return _dedupe(queries)[:3]
+    return _dedupe(queries)[:10 if is_ukraine_context else 3]
 
 
 def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8) -> List[Dict]:
@@ -412,6 +470,33 @@ def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8)
     return merged
 
 
+def _source_domain(link: str) -> str:
+    import urllib.parse
+    try:
+        host = urllib.parse.urlparse(link).hostname or ""
+    except Exception:
+        return ""
+    host = host.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _is_ukrainian_source(link: str) -> bool:
+    host = _source_domain(link)
+    return any(host == domain or host.endswith("." + domain) for domain in UKRAINIAN_SOURCE_DOMAINS)
+
+
+def _rank_evidence_results(results: List[Dict], ukraine_context: bool = False) -> List[Dict]:
+    if not ukraine_context:
+        return results
+    return sorted(
+        results,
+        key=lambda item: (
+            0 if _is_ukrainian_source(item.get("link", "")) else 1,
+            len(item.get("snippet", "")) == 0,
+        ),
+    )
+
+
 def _filter_credible(results, category: Optional[str] = None):
     import urllib.parse
     blacklist = [
@@ -423,15 +508,17 @@ def _filter_credible(results, category: Optional[str] = None):
     global_allowlist = [
         'reuters.com', 'apnews.com', 'bbc.co.uk', 'bbc.com', 'nytimes.com', 'washingtonpost.com',
         'theguardian.com', 'cnn.com', 'bloomberg.com', 'economist.com', 'factcheck.org', 'snopes.com',
-        'politifact.com', 'fullfact.org', 'afp.com', 'africacheck.org', 'leadstories.com'
+        'politifact.com', 'fullfact.org', 'afp.com', 'africacheck.org', 'leadstories.com',
+        *UKRAINIAN_FACTCHECK_DOMAINS,
+        *UKRAINIAN_NEWS_DOMAINS,
     ]
 
     category_allowlists = {
         'health': ['cdc.gov', 'who.int', 'nejm.org', 'hmh.com'],
-        'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com'],
+        'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS],
         'economy': ['ft.com', 'economist.com', 'bloomberg.com', 'wsj.com'],
         'science': ['nature.com', 'sciencemag.org', 'who.int'],
-        'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com'],
+        'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS],
         'default': global_allowlist
     }
 
@@ -488,32 +575,48 @@ def _filter_credible(results, category: Optional[str] = None):
 
 def _search_claim_results(claim_text: str, original_text: str, category: Optional[str], suspected_author: str = "") -> List[Dict]:
     search_queries = _build_search_queries(original_text, claim_text)
+    ukraine_context = _is_ukraine_context(original_text, claim_text)
     try:
         collected_results = []
         for query in search_queries:
-            ddg_results = DuckDuckGoService.search(query, max_results=5)
+            ddg_results = DuckDuckGoService.search(
+                query,
+                max_results=5,
+                region="ua-uk" if ukraine_context else "",
+            )
+            serper_results = SerperService.search(
+                query,
+                gl="ua" if ukraine_context else "",
+                hl="uk" if ukraine_context else "",
+            )
             if ddg_results:
                 collected_results.append(ddg_results)
-                continue
-            serper_results = SerperService.search(query)
             if serper_results:
                 collected_results.append(serper_results)
-        search_results = _merge_search_results(collected_results, max_results=10)
+        search_results = _merge_search_results(collected_results, max_results=18 if ukraine_context else 10)
     except Exception as e:
         logger.warning("primary search failed, falling back to DuckDuckGo then Serper: %s", e)
         fallback_results = []
         for query in search_queries:
-            ddg_results = DuckDuckGoService.search(query, max_results=5)
+            ddg_results = DuckDuckGoService.search(
+                query,
+                max_results=5,
+                region="ua-uk" if ukraine_context else "",
+            )
             if ddg_results:
                 fallback_results.append(ddg_results)
                 continue
-            fallback_results.append(SerperService.search(query))
-        search_results = _merge_search_results(fallback_results, max_results=10)
+            fallback_results.append(SerperService.search(
+                query,
+                gl="ua" if ukraine_context else "",
+                hl="uk" if ukraine_context else "",
+            ))
+        search_results = _merge_search_results(fallback_results, max_results=18 if ukraine_context else 10)
 
     if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
         logger.info("authorship-sensitive search triggered claim=%r", claim_text)
 
-    return _filter_credible(search_results, category=category)
+    return _rank_evidence_results(_filter_credible(search_results, category=category), ukraine_context=ukraine_context)
 
 
 def _extract_verdict_label(verdict_md: str) -> str:

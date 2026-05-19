@@ -32,10 +32,34 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 GUIDANCE_PDF_PATHS = [p.strip() for p in os.getenv("GUIDANCE_PDF_PATHS", "").split(os.pathsep) if p.strip()]
 
-# Optional comma-separated list of reliable news domains (e.g. cnn.com,bbc.co.uk)
-RELIABLE_NEWS_DOMAINS = [d.strip().lower() for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",") if d.strip()]
+DEFAULT_RELIABLE_NEWS_DOMAINS = [
+    "reuters.com",
+    "apnews.com",
+    "bbc.com",
+    "bbc.co.uk",
+    "afp.com",
+    "kyivindependent.com",
+    "pravda.com.ua",
+    "euromaidanpress.com",
+    "ukrinform.net",
+    "suspilne.media",
+    "hromadske.ua",
+    "detector.media",
+]
+
+# Optional comma-separated list of additional reliable news domains (e.g. cnn.com,bbc.co.uk)
+RELIABLE_NEWS_DOMAINS = DEFAULT_RELIABLE_NEWS_DOMAINS + [
+    d.strip().lower()
+    for d in os.getenv("RELIABLE_NEWS_DOMAINS", "").split(",")
+    if d.strip()
+]
 
 PRIORITY_FACTCHECK_DOMAINS = [
+    "stopfake.org",
+    "voxukraine.org",
+    "detector.media",
+    "factcheck.ge",
+    "euvsdisinfo.eu",
     "politifact.com",
     "reuters.com",
     "factcheck.org",
@@ -46,6 +70,11 @@ PRIORITY_FACTCHECK_DOMAINS = [
     "fullfact.org",
     "reuters.com",
     "afp.com",
+    "kyivindependent.com",
+    "pravda.com.ua",
+    "ukrinform.net",
+    "suspilne.media",
+    "hromadske.ua",
 ]
 
 # Domains we treat as social media / user-generated content and want to exclude
@@ -237,9 +266,13 @@ def get_project_guidance(query: str, max_chunks: int = 3) -> str:
 
 class SerperService:
     @staticmethod
-    def search(query: str) -> List[Dict]:
+    def search(query: str, gl: str = "", hl: str = "") -> List[Dict]:
         url = "https://google.serper.dev/search"
         payload = {"q": query}
+        if gl:
+            payload["gl"] = gl
+        if hl:
+            payload["hl"] = hl
         headers = {
             'X-API-KEY': SERPER_API_KEY,
             'Content-Type': 'application/json'
@@ -265,7 +298,7 @@ class SerperService:
 
 class DuckDuckGoService:
     @staticmethod
-    def search(query: str, max_results: int = 5) -> List[Dict]:
+    def search(query: str, max_results: int = 5, region: str = "") -> List[Dict]:
         """Use duckduckgo_search if installed to get organic results.
         Returns list of dicts with keys: title, link, snippet
         """
@@ -273,7 +306,10 @@ class DuckDuckGoService:
             logger.warning("DDGS search package not available")
             return []
         try:
-            results = DDGS().text(query, max_results=max_results)
+            try:
+                results = DDGS().text(query, max_results=max_results, region=region or "wt-wt")
+            except TypeError:
+                results = DDGS().text(query, max_results=max_results)
             out = []
             for r in results:
                 out.append({
@@ -374,6 +410,8 @@ Rules:
 - If the text contains several factual statements, choose the one that would matter most to verify for misinformation review.
 - If the text is promotional or ad-like but implies eligibility, hidden benefits, grants, payouts, compensation, deadlines, or urgent action, extract the IMPLIED factual claim behind the promotion.
 - Keep concrete names, places, dates, numbers, actions, and outcomes when present.
+- Support any language. Preserve names and key quoted phrases in the source language when useful, and translate only enough to make the claim clear.
+- For Ukrainian or Russian-language posts, pay close attention to translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
 
 Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
 
@@ -403,6 +441,8 @@ Rules:
 - Treat scam ads, benefit-eligibility bait, urgent enrollment offers, grant/payout offers, and hidden-benefit promotions as fact-checkable claims even if phrased like marketing.
 - For promotional bait, extract the implied factual claim, not just the slogan.
 - Keep each claim short, concrete, and standalone.
+- Support any language. Preserve names and key quoted phrases in the source language when useful, and translate only enough to make each claim clear.
+- For Ukrainian or Russian-language posts, pay close attention to translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
 - If there is only 1 real factual claim, return just 1.
 - If there is no factual claim, return NO_CLAIM.
 
@@ -444,6 +484,7 @@ Rules:
 - If the text explicitly says a named person said or wrote a quoted statement, that attribution can be a checkable claim, but it should not override a stronger substantive claim unless the quote attribution is the real dispute.
 - Treat scam-like ads, benefit bait, grant/payout offers, miracle offers, and urgent qualification/enrollment messages as FACTUAL_CLAIM even when they look like advertisement copy.
 - If the text implies someone can qualify for hidden, new, limited-time, or little-known benefits, grants, compensation, or payouts, extract that implied claim.
+- Support any language. For Ukrainian or Russian-language posts, account for translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
 - If NO_CLAIM, leave the claim blank.
 
 Return exactly in this format:
@@ -487,6 +528,23 @@ TEXT:
         """Analyze the claim against search results and produce a verdict."""
         guidance_query = f"{claim}\n{original_text}\n{suspected_author}"
         guidance_block = self._guidance_block(guidance_query)
+        has_cyrillic = bool(re.search(r"[\u0400-\u04ff]", f"{claim}\n{original_text}"))
+        ukraine_markers = [
+            "укра", "київ", "киев", "зеленськ", "зеленск", "ukraine", "ukrainian",
+            "zelensky", "zelenskyy", "russia", "рос", "війна", "война", "kyiv", "kiev",
+        ]
+        is_ukraine_context = has_cyrillic or any(
+            marker in f"{claim}\n{original_text}".lower()
+            for marker in ukraine_markers
+        )
+        language_context = (
+            "This appears to be Ukrainian/Russian/Cyrillic or Ukraine-related content. "
+            "Use Ukrainian-language evidence directly when relevant, translate it as needed, "
+            "and prefer Ukrainian fact-checkers, Ukrainian primary reporting, wire services, "
+            "and official sources over unrelated English background results."
+            if is_ukraine_context
+            else "No specific source-language context detected."
+        )
         context = ""
         for i, res in enumerate(search_results):
             context += f"Source {i+1}: {res.get('title')}\n"
@@ -500,8 +558,9 @@ TEXT:
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
-8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
-9. Provide a structured report in Markdown."""
+8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources.
+9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
+10. Provide a structured report in Markdown."""
 
         if prioritize_authorship:
             task_steps = """1. Determine the truthfulness of the main factual claim.
@@ -511,8 +570,9 @@ TEXT:
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
-8. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
-9. Provide a structured report in Markdown."""
+8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources.
+9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
+10. Provide a structured report in Markdown."""
 
         prompt = f"""You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
 Analyze the following claim using the provided search results.
@@ -527,6 +587,9 @@ ORIGINAL POST TEXT:
 
 SUSPECTED AUTHOR:
 {suspected_author or "Unknown / not clearly stated"}
+
+LANGUAGE / REGION CONTEXT:
+{language_context}
 
 SEARCH RESULTS:
 {context}
