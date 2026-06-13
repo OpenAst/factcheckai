@@ -497,19 +497,96 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Pin to page button
     if (pinBtn) {
-        // Try to get current pinned state
+        // Determine initial state; try content script first, then DOM fallback
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            const state = await chrome.tabs.sendMessage(tab.id, { action: 'isPinned' });
-            if (state && state.pinned) pinBtn.textContent = 'Unpin From Page';
+            let state;
+            try {
+                state = await chrome.tabs.sendMessage(tab.id, { action: 'isPinned' });
+            } catch (_) {
+                state = undefined;
+            }
+            if (state && state.pinned) {
+                pinBtn.textContent = 'Unpin From Page';
+            } else {
+                try {
+                    const check = await chrome.scripting.executeScript({
+                        target: { tabId: tab.id },
+                        func: () => !!document.getElementById('factcheck-overlay-iframe')
+                    });
+                    if (check && check[0] && check[0].result) pinBtn.textContent = 'Unpin From Page';
+                } catch (_) {
+                    // ignore
+                }
+            }
         } catch (e) {
-            // ignore - content script might not be available on this page
+            // ignore
         }
 
         pinBtn.addEventListener('click', async () => {
             try {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                const resp = await chrome.tabs.sendMessage(tab.id, { action: 'togglePin' });
+                let resp;
+                try {
+                    resp = await chrome.tabs.sendMessage(tab.id, { action: 'togglePin' });
+                } catch (_) {
+                    resp = undefined;
+                }
+
+                if (resp === undefined) {
+                    // Content script not present; inject/remove overlay directly into the page
+                    const extensionUrl = chrome.runtime.getURL('popup.html');
+                    try {
+                        await chrome.scripting.executeScript({
+                            target: { tabId: tab.id },
+                            func: (url) => {
+                                const existing = document.getElementById('factcheck-overlay-iframe');
+                                if (existing) {
+                                    const tb = document.getElementById('factcheck-overlay-toolbar');
+                                    existing.remove();
+                                    if (tb) tb.remove();
+                                    return { pinned: false };
+                                }
+                                const iframe = document.createElement('iframe');
+                                iframe.src = url;
+                                iframe.id = 'factcheck-overlay-iframe';
+                                iframe.style.position = 'fixed';
+                                iframe.style.right = '20px';
+                                iframe.style.bottom = '20px';
+                                iframe.style.width = '360px';
+                                iframe.style.height = '500px';
+                                iframe.style.zIndex = 2147483647;
+                                iframe.style.border = '1px solid rgba(0,0,0,0.15)';
+                                iframe.style.borderRadius = '8px';
+                                iframe.style.boxShadow = '0 6px 20px rgba(0,0,0,0.25)';
+                                document.documentElement.appendChild(iframe);
+
+                                const toolbar = document.createElement('div');
+                                toolbar.id = 'factcheck-overlay-toolbar';
+                                toolbar.style.position = 'fixed';
+                                toolbar.style.right = '20px';
+                                toolbar.style.bottom = (20 + 500 + 8) + 'px';
+                                toolbar.style.zIndex = 2147483647;
+                                const close = document.createElement('button');
+                                close.textContent = 'Close';
+                                close.style.padding = '6px 10px';
+                                close.style.borderRadius = '6px';
+                                close.style.cursor = 'pointer';
+                                close.addEventListener('click', () => { iframe.remove(); toolbar.remove(); });
+                                toolbar.appendChild(close);
+                                document.documentElement.appendChild(toolbar);
+
+                                return { pinned: true };
+                            },
+                            args: [extensionUrl]
+                        });
+                        pinBtn.textContent = 'Unpin From Page';
+                        return;
+                    } catch (err) {
+                        throw err;
+                    }
+                }
+
                 if (resp && resp.pinned) {
                     pinBtn.textContent = 'Unpin From Page';
                 } else {
