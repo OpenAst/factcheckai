@@ -21,7 +21,7 @@
     "https://*.intern.facebook.com/*",
     "https://*.our.intern.facebook.com/*",
     "https://factcheckai-api.onrender.com/*",
-    "http://jxr36a5v6auepw1fgh0x2b7c.68.168.208.98.sslip.io/*"
+    "https://jxr36a5v6auepw1fgh0x2b7c.68.168.208.98.sslip.io/*"
   ],
   "action": {
     "default_popup": "popup.html",

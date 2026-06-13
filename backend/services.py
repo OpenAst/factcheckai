@@ -412,6 +412,7 @@ Rules:
 - Keep concrete names, places, dates, numbers, actions, and outcomes when present.
 - Support any language. Preserve names and key quoted phrases in the source language when useful, and translate only enough to make the claim clear.
 - For Ukrainian or Russian-language posts, pay close attention to translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
+- For Spanish-language posts, preserve key names and phrases in Spanish when useful, and translate only enough to make the claim clear.
 
 Output ONLY the claim as a short sentence (max 2 sentences). Do NOT add any commentary or explanation.
 
@@ -443,6 +444,7 @@ Rules:
 - Keep each claim short, concrete, and standalone.
 - Support any language. Preserve names and key quoted phrases in the source language when useful, and translate only enough to make each claim clear.
 - For Ukrainian or Russian-language posts, pay close attention to translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
+- For Spanish-language posts, preserve key names and phrases in Spanish when useful, and translate only enough to make each claim clear.
 - If there is only 1 real factual claim, return just 1.
 - If there is no factual claim, return NO_CLAIM.
 
@@ -485,6 +487,7 @@ Rules:
 - Treat scam-like ads, benefit bait, grant/payout offers, miracle offers, and urgent qualification/enrollment messages as FACTUAL_CLAIM even when they look like advertisement copy.
 - If the text implies someone can qualify for hidden, new, limited-time, or little-known benefits, grants, compensation, or payouts, extract that implied claim.
 - Support any language. For Ukrainian or Russian-language posts, account for translation, context, and whether the claim concerns Ukraine, Russia, war, media, or public officials.
+- For Spanish-language posts, account for translation, regional wording, and whether the claim concerns Spain, Latin America, immigration, elections, health, scams, or public officials.
 - If NO_CLAIM, leave the claim blank.
 
 Return exactly in this format:
@@ -524,26 +527,41 @@ TEXT:
         original_text: str = "",
         suspected_author: str = "",
         prioritize_authorship: bool = False,
+        language_context: Dict[str, str] = None,
     ) -> str:
         """Analyze the claim against search results and produce a verdict."""
         guidance_query = f"{claim}\n{original_text}\n{suspected_author}"
         guidance_block = self._guidance_block(guidance_query)
-        has_cyrillic = bool(re.search(r"[\u0400-\u04ff]", f"{claim}\n{original_text}"))
-        ukraine_markers = [
-            "укра", "київ", "киев", "зеленськ", "зеленск", "ukraine", "ukrainian",
-            "zelensky", "zelenskyy", "russia", "рос", "війна", "война", "kyiv", "kiev",
-        ]
-        is_ukraine_context = has_cyrillic or any(
-            marker in f"{claim}\n{original_text}".lower()
-            for marker in ukraine_markers
-        )
-        language_context = (
-            "This appears to be Ukrainian/Russian/Cyrillic or Ukraine-related content. "
-            "Use Ukrainian-language evidence directly when relevant, translate it as needed, "
-            "and prefer Ukrainian fact-checkers, Ukrainian primary reporting, wire services, "
-            "and official sources over unrelated English background results."
-            if is_ukraine_context
-            else "No specific source-language context detected."
+        language_context = language_context or {}
+        language = language_context.get("language", "")
+        language_label = language_context.get("label", "Unknown")
+        if language == "spanish_ukraine_context":
+            language_instruction = (
+                "This appears to be Spanish-language content about Ukraine or a Ukraine-related topic. "
+                "Use Spanish-language and Ukrainian-language evidence directly when relevant, translate it as needed, "
+                "and prefer Spanish-language fact-checkers, Ukrainian fact-checkers, credible regional reporting, "
+                "wire services, and official sources over unrelated English background results."
+            )
+        elif language in {"ukrainian", "ukraine_context"}:
+            language_instruction = (
+                "This appears to be Ukrainian/Russian/Cyrillic or Ukraine-related content. "
+                "Use Ukrainian-language evidence directly when relevant, translate it as needed, "
+                "and prefer Ukrainian fact-checkers, Ukrainian primary reporting, wire services, "
+                "and official sources over unrelated English background results."
+            )
+        elif language == "spanish":
+            language_instruction = (
+                "This appears to be Spanish-language content. Use Spanish-language evidence directly "
+                "when relevant, translate it as needed, and prefer Spanish-language fact-checkers, "
+                "wire services, credible Spanish-language news, and official sources over unrelated "
+                "English background results."
+            )
+        else:
+            language_instruction = "No specific source-language context detected; use the most direct reliable evidence available."
+        language_context_text = (
+            f"Detected context: {language_label} "
+            f"(confidence: {language_context.get('confidence', 'low')}). "
+            f"{language_instruction}"
         )
         context = ""
         for i, res in enumerate(search_results):
@@ -558,7 +576,7 @@ TEXT:
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
-8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources.
+8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
 10. Provide a structured report in Markdown."""
 
@@ -570,7 +588,7 @@ TEXT:
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
-8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources.
+8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
 10. Provide a structured report in Markdown."""
 
@@ -589,7 +607,7 @@ SUSPECTED AUTHOR:
 {suspected_author or "Unknown / not clearly stated"}
 
 LANGUAGE / REGION CONTEXT:
-{language_context}
+{language_context_text}
 
 SEARCH RESULTS:
 {context}

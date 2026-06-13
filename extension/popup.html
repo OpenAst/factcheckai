@@ -5,16 +5,18 @@
   <title>SRT Fact-Check AI</title>
   <style>
     body {
-      width: 350px;
+      width: 380px;
       padding: 15px;
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       margin: 0;
       background: #f4f7f6;
+      color: #24313a;
     }
 
     .header {
       display: flex;
       align-items: center;
+      justify-content: space-between;
       margin-bottom: 15px;
       border-bottom: 1px solid #ddd;
       padding-bottom: 10px;
@@ -53,6 +55,32 @@
       display: none;
     }
 
+    .section {
+      display: none;
+      margin-top: 12px;
+      background: #fff;
+      border: 1px solid #dde7e3;
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #2c3e50;
+    }
+
+    .hint-text {
+      color: #66757f;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
     button {
       width: 100%;
       background: #3498db;
@@ -87,6 +115,32 @@
     .badge-cached {
       background: #e67e22;
       color: white;
+    }
+
+    .badge-signal {
+      margin: 0 5px 6px 0;
+      text-transform: none;
+      background: #eef5ff;
+      color: #24527a;
+      border: 1px solid #d6e7f7;
+    }
+
+    .badge-good {
+      background: #ecf9f1;
+      color: #17643a;
+      border-color: #c9ead6;
+    }
+
+    .badge-warn {
+      background: #fff7e6;
+      color: #8a5a00;
+      border-color: #f4d79a;
+    }
+
+    .badge-risk {
+      background: #fff1f0;
+      color: #8a1f17;
+      border-color: #f1c1bc;
     }
 
     .copy-btn {
@@ -147,6 +201,71 @@
       background: #138d75;
     }
 
+    .secondary-btn {
+      width: auto;
+      padding: 5px 8px;
+      font-size: 11px;
+      background: #607d8b;
+      margin: 4px 4px 0 0;
+    }
+
+    .secondary-btn:hover {
+      background: #546e7a;
+    }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .decision-btn {
+      padding: 7px 5px;
+      font-size: 11px;
+      line-height: 1.15;
+      background: #34495e;
+    }
+
+    .decision-btn:hover,
+    .decision-btn.active {
+      background: #1f618d;
+    }
+
+    .claim-option,
+    .evidence-item {
+      margin-bottom: 8px;
+      padding: 8px;
+      background: #f7faf9;
+      border: 1px solid #e1ebe7;
+      border-radius: 6px;
+    }
+
+    .claim-option.active,
+    .evidence-item.best {
+      border-color: #16a085;
+      background: #ecf9f6;
+    }
+
+    .evidence-item.rejected {
+      opacity: 0.55;
+      border-style: dashed;
+    }
+
+    .source-domain {
+      display: inline-block;
+      margin-bottom: 4px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f3;
+      color: #52636d;
+      font-size: 10px;
+      font-weight: 700;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .mini-status {
       display: none;
       margin-top: 8px;
@@ -199,6 +318,10 @@
   </div>
 
   <div style="margin-bottom:10px;">
+    <button id="pin-btn" class="retry-btn">Pin To Page</button>
+  </div>
+
+  <div style="margin-bottom:10px;">
     <button id="check-btn" disabled>Fact Check Claim</button>
   </div>
 
@@ -206,20 +329,41 @@
     Analyzing claim<span class="loading-dots"></span>
   </div>
 
-  <div id="extracted-claim-box"
-    style="display:none; font-size:12px; color:#888; margin-bottom:8px; background:#f5f5f5; border-radius:6px; padding:8px;">
-    <strong>Possible Claims Identified:</strong>
+  <div id="extracted-claim-box" class="section">
+    <div class="section-title">
+      <span>Possible Claims</span>
+      <span class="hint-text">Pick the strongest checkable claim</span>
+    </div>
     <div id="extracted-claim-text"></div>
+  </div>
+
+  <div id="signal-section" class="section">
+    <div class="section-title">
+      <span>Trust Signals</span>
+    </div>
+    <div id="signal-badges"></div>
   </div>
 
   <div id="result"></div>
   <button id="copy-btn" class="copy-btn">Copy Report</button>
 
-  <div id="evidence-section" style="display:none; margin-top:12px;">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-      <strong style="font-size:13px;">Evidence Links</strong>
+  <div id="decision-section" class="section">
+    <div class="section-title">
+      <span>Final Decision</span>
+      <span class="hint-text">Saves with best source</span>
+    </div>
+    <div id="decision-buttons" class="decision-grid"></div>
+  </div>
+
+  <div id="evidence-section" class="section">
+    <div class="section-title">
+      <span>Evidence Links</span>
       <button id="copy-links-btn" class="retry-btn" style="width:auto; font-size:11px; padding:4px 10px;">Copy All
         Links</button>
+    </div>
+    <div style="margin-bottom:8px;">
+      <button id="open-all-links-btn" class="secondary-btn">Open All</button>
+      <button id="copy-source-verdict-btn" class="secondary-btn">Copy Source + Verdict</button>
     </div>
     <div id="evidence-links"></div>
     <div id="save-review-status" class="mini-status"></div>

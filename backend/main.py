@@ -98,6 +98,9 @@ class FactCheckResponse(BaseModel):
     is_cached: bool = False
     claim_status: str = "factual_claim"
     claim_reason: str = ""
+    detected_language: str = "unknown"
+    language_label: str = "Unknown"
+    language_confidence: str = "low"
 
 
 class CuratedEvidenceRequest(BaseModel):
@@ -114,8 +117,9 @@ class ReviewSelectionRequest(BaseModel):
     post_text: str
     extracted_claim: str = ""
     claim_status: str = ""
+    rater_decision: str = ""
     verdict_md: str = ""
-    selected_evidence_url: str
+    selected_evidence_url: str = ""
     selected_evidence_title: str = ""
     selected_evidence_snippet: str = ""
     evidence_links: List[EvidenceLink] = []
@@ -135,7 +139,7 @@ class OcrJobResponse(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-05-19-ukraine-multilingual-evidence"
+CACHE_VERSION = "2026-06-13-ukraine-spanish-language-routing"
 
 UKRAINIAN_NEWS_DOMAINS = [
     "kyivindependent.com",
@@ -154,6 +158,29 @@ UKRAINIAN_FACTCHECK_DOMAINS = [
 ]
 
 UKRAINIAN_SOURCE_DOMAINS = UKRAINIAN_FACTCHECK_DOMAINS + UKRAINIAN_NEWS_DOMAINS
+
+SPANISH_FACTCHECK_DOMAINS = [
+    "maldita.es",
+    "newtral.es",
+    "verificat.cat",
+    "chequeado.com",
+    "colombiacheck.com",
+    "animalpolitico.com",
+    "verificado.com.mx",
+    "efe.com",
+    "afp.com",
+]
+
+SPANISH_NEWS_DOMAINS = [
+    "elpais.com",
+    "bbc.com",
+    "cnnespanol.cnn.com",
+    "univision.com",
+    "telemundo.com",
+    "efe.com",
+]
+
+SPANISH_SOURCE_DOMAINS = SPANISH_FACTCHECK_DOMAINS + SPANISH_NEWS_DOMAINS
 
 # Admin token for simple auth on cache listing endpoint
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
@@ -175,6 +202,19 @@ def _normalize_space(value: str) -> str:
 
 def _has_cyrillic(value: str) -> bool:
     return bool(re.search(r"[\u0400-\u04ff]", value or ""))
+
+
+def _spanish_signal_score(value: str) -> int:
+    lowered = f" {(value or '').lower()} "
+    accented_chars = len(re.findall(r"[áéíóúñü¿¡]", lowered))
+    spanish_words = [
+        " el ", " la ", " los ", " las ", " de ", " del ", " que ", " para ", " por ",
+        " con ", " una ", " un ", " en ", " sobre ", " gobierno ", " presidente ",
+        " vacuna", " elecciones", " falso", " engañoso", " verificado", "según",
+        " años", " país", " policía", " salud", " dinero", " migrantes",
+    ]
+    word_hits = sum(1 for marker in spanish_words if marker in lowered)
+    return accented_chars + word_hits
 
 
 def _looks_ukraine_related(value: str) -> bool:
@@ -202,6 +242,57 @@ def _looks_ukraine_related(value: str) -> bool:
 def _is_ukraine_context(original_text: str, claim_text: str = "") -> bool:
     combined = f"{original_text}\n{claim_text}"
     return _has_cyrillic(combined) or _looks_ukraine_related(combined)
+
+
+def _detect_language_context(original_text: str, claim_text: str = "") -> Dict[str, str]:
+    combined = _normalize_space(f"{original_text}\n{claim_text}")
+    ukraine_context = _is_ukraine_context(original_text, claim_text)
+    spanish_score = _spanish_signal_score(combined)
+
+    if ukraine_context and spanish_score >= 3:
+        return {
+            "language": "spanish_ukraine_context",
+            "label": "Spanish / Ukraine context",
+            "region": "ua",
+            "search_gl": "ua",
+            "search_hl": "es",
+            "ddg_region": "ua-uk",
+            "confidence": "high" if _has_cyrillic(combined) or spanish_score >= 6 else "medium",
+        }
+
+    if ukraine_context:
+        has_ukrainian_chars = bool(re.search(r"[іїєґІЇЄҐ]", combined))
+        has_cyrillic = _has_cyrillic(combined)
+        return {
+            "language": "ukrainian" if has_ukrainian_chars or has_cyrillic else "ukraine_context",
+            "label": "Ukrainian / Ukraine context" if has_cyrillic else "Ukraine context",
+            "region": "ua",
+            "search_gl": "ua",
+            "search_hl": "uk",
+            "ddg_region": "ua-uk",
+            "confidence": "high" if has_cyrillic else "medium",
+        }
+
+    if spanish_score >= 3:
+        return {
+            "language": "spanish",
+            "label": "Spanish",
+            "region": "es",
+            "search_gl": "es",
+            "search_hl": "es",
+            "ddg_region": "es-es",
+            "confidence": "medium" if spanish_score < 6 else "high",
+        }
+
+    return {
+        "language": "english_or_unknown",
+        "label": "English / unknown",
+        "region": "",
+        "search_gl": "",
+        "search_hl": "",
+        "ddg_region": "",
+        "confidence": "low",
+    }
 
 
 def _extract_suspected_author(text: str) -> str:
@@ -425,7 +516,9 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     suspected_author = _extract_suspected_author(original_text)
     quote_fragment = _extract_quote_fragment(original_text, suspected_author)
 
-    is_ukraine_context = _is_ukraine_context(original_text, extracted_claim)
+    language_context = _detect_language_context(original_text, extracted_claim)
+    is_ukraine_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish_ukraine_context"}
+    is_spanish_context = language_context["language"] in {"spanish", "spanish_ukraine_context"}
 
     if is_ukraine_context:
         for domain in UKRAINIAN_FACTCHECK_DOMAINS:
@@ -434,6 +527,13 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
         queries.append(f"{extracted_claim} фактчек")
         queries.append(f"{extracted_claim} фейк перевірка фактів")
         queries.append(f"{extracted_claim} українські новини")
+    if is_spanish_context:
+        for domain in SPANISH_FACTCHECK_DOMAINS:
+            queries.append(f"{extracted_claim} site:{domain}")
+        queries.append(f"{extracted_claim} verificación de datos")
+        queries.append(f"{extracted_claim} falso engañoso evidencia")
+        queries.append(f"{extracted_claim} fact check español")
+        queries.append(f"{extracted_claim} noticias español")
     queries.append(f"{extracted_claim} fact check")
     queries.append(f"{extracted_claim} false misleading evidence")
 
@@ -450,7 +550,9 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             queries.append(f'"{suspected_author}" said news Reuters AP')
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
-    return _dedupe(queries)[:10 if is_ukraine_context else 3]
+    if is_ukraine_context or is_spanish_context:
+        return _dedupe(queries)[:10]
+    return _dedupe(queries)[:3]
 
 
 def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8) -> List[Dict]:
@@ -485,13 +587,25 @@ def _is_ukrainian_source(link: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in UKRAINIAN_SOURCE_DOMAINS)
 
 
-def _rank_evidence_results(results: List[Dict], ukraine_context: bool = False) -> List[Dict]:
-    if not ukraine_context:
+def _is_spanish_source(link: str) -> bool:
+    host = _source_domain(link)
+    return any(host == domain or host.endswith("." + domain) for domain in SPANISH_SOURCE_DOMAINS)
+
+
+def _rank_evidence_results(results: List[Dict], language_context: Optional[Dict[str, str]] = None) -> List[Dict]:
+    language = (language_context or {}).get("language", "")
+    if language not in {"ukrainian", "ukraine_context", "spanish", "spanish_ukraine_context"}:
         return results
+    def source_matcher(link: str) -> bool:
+        if language == "spanish_ukraine_context":
+            return _is_spanish_source(link) or _is_ukrainian_source(link)
+        if language == "spanish":
+            return _is_spanish_source(link)
+        return _is_ukrainian_source(link)
     return sorted(
         results,
         key=lambda item: (
-            0 if _is_ukrainian_source(item.get("link", "")) else 1,
+            0 if source_matcher(item.get("link", "")) else 1,
             len(item.get("snippet", "")) == 0,
         ),
     )
@@ -511,14 +625,16 @@ def _filter_credible(results, category: Optional[str] = None):
         'politifact.com', 'fullfact.org', 'afp.com', 'africacheck.org', 'leadstories.com',
         *UKRAINIAN_FACTCHECK_DOMAINS,
         *UKRAINIAN_NEWS_DOMAINS,
+        *SPANISH_FACTCHECK_DOMAINS,
+        *SPANISH_NEWS_DOMAINS,
     ]
 
     category_allowlists = {
         'health': ['cdc.gov', 'who.int', 'nejm.org', 'hmh.com'],
-        'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS],
+        'politics': ['politifact.com', 'factcheck.org', 'apnews.com', 'reuters.com', 'africacheck.org', 'leadstories.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS, *SPANISH_FACTCHECK_DOMAINS, *SPANISH_NEWS_DOMAINS],
         'economy': ['ft.com', 'economist.com', 'bloomberg.com', 'wsj.com'],
         'science': ['nature.com', 'sciencemag.org', 'who.int'],
-        'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS],
+        'international': ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com', 'afp.com', *UKRAINIAN_FACTCHECK_DOMAINS, *UKRAINIAN_NEWS_DOMAINS, *SPANISH_FACTCHECK_DOMAINS, *SPANISH_NEWS_DOMAINS],
         'default': global_allowlist
     }
 
@@ -575,25 +691,26 @@ def _filter_credible(results, category: Optional[str] = None):
 
 def _search_claim_results(claim_text: str, original_text: str, category: Optional[str], suspected_author: str = "") -> List[Dict]:
     search_queries = _build_search_queries(original_text, claim_text)
-    ukraine_context = _is_ukraine_context(original_text, claim_text)
+    language_context = _detect_language_context(original_text, claim_text)
+    is_regional_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish", "spanish_ukraine_context"}
     try:
         collected_results = []
         for query in search_queries:
             ddg_results = DuckDuckGoService.search(
                 query,
                 max_results=5,
-                region="ua-uk" if ukraine_context else "",
+                region=language_context.get("ddg_region", ""),
             )
             serper_results = SerperService.search(
                 query,
-                gl="ua" if ukraine_context else "",
-                hl="uk" if ukraine_context else "",
+                gl=language_context.get("search_gl", ""),
+                hl=language_context.get("search_hl", ""),
             )
             if ddg_results:
                 collected_results.append(ddg_results)
             if serper_results:
                 collected_results.append(serper_results)
-        search_results = _merge_search_results(collected_results, max_results=18 if ukraine_context else 10)
+        search_results = _merge_search_results(collected_results, max_results=18 if is_regional_context else 10)
     except Exception as e:
         logger.warning("primary search failed, falling back to DuckDuckGo then Serper: %s", e)
         fallback_results = []
@@ -601,22 +718,22 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
             ddg_results = DuckDuckGoService.search(
                 query,
                 max_results=5,
-                region="ua-uk" if ukraine_context else "",
+                region=language_context.get("ddg_region", ""),
             )
             if ddg_results:
                 fallback_results.append(ddg_results)
                 continue
             fallback_results.append(SerperService.search(
                 query,
-                gl="ua" if ukraine_context else "",
-                hl="uk" if ukraine_context else "",
+                gl=language_context.get("search_gl", ""),
+                hl=language_context.get("search_hl", ""),
             ))
-        search_results = _merge_search_results(fallback_results, max_results=18 if ukraine_context else 10)
+        search_results = _merge_search_results(fallback_results, max_results=18 if is_regional_context else 10)
 
     if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
         logger.info("authorship-sensitive search triggered claim=%r", claim_text)
 
-    return _rank_evidence_results(_filter_credible(search_results, category=category), ukraine_context=ukraine_context)
+    return _rank_evidence_results(_filter_credible(search_results, category=category), language_context=language_context)
 
 
 def _extract_verdict_label(verdict_md: str) -> str:
@@ -728,8 +845,8 @@ def admin_add_evidence(payload: CuratedEvidenceRequest, x_admin_token: Optional[
 def save_review(payload: ReviewSelectionRequest):
     if not payload.post_text.strip():
         raise HTTPException(status_code=400, detail="post_text is required")
-    if not payload.selected_evidence_url.strip():
-        raise HTTPException(status_code=400, detail="selected_evidence_url is required")
+    if not payload.selected_evidence_url.strip() and not payload.rater_decision.strip():
+        raise HTTPException(status_code=400, detail="selected_evidence_url or rater_decision is required")
 
     evidence_links = [
         {"title": item.title, "url": item.url, "snippet": item.snippet}
@@ -742,6 +859,7 @@ def save_review(payload: ReviewSelectionRequest):
         extracted_claim=payload.extracted_claim.strip(),
         claim_status=payload.claim_status.strip(),
         system_verdict=system_verdict,
+        rater_decision=payload.rater_decision.strip(),
         verdict_markdown=payload.verdict_md.strip(),
         selected_evidence_url=payload.selected_evidence_url.strip(),
         selected_evidence_title=payload.selected_evidence_title.strip(),
@@ -750,15 +868,16 @@ def save_review(payload: ReviewSelectionRequest):
         notes=payload.notes.strip(),
     )
 
-    CuratedEvidenceService.add_entry(
-        url=payload.selected_evidence_url.strip(),
-        title=payload.selected_evidence_title.strip(),
-        source="Rater selected evidence",
-        claim_summary=payload.extracted_claim.strip(),
-        verdict=system_verdict,
-        notes=payload.notes.strip() or payload.post_text.strip()[:500],
-        tags=[tag for tag in [payload.claim_status.strip(), "rater-selected"] if tag],
-    )
+    if payload.selected_evidence_url.strip():
+        CuratedEvidenceService.add_entry(
+            url=payload.selected_evidence_url.strip(),
+            title=payload.selected_evidence_title.strip(),
+            source="Rater selected evidence",
+            claim_summary=payload.extracted_claim.strip(),
+            verdict=payload.rater_decision.strip() or system_verdict,
+            notes=payload.notes.strip() or payload.post_text.strip()[:500],
+            tags=[tag for tag in [payload.claim_status.strip(), payload.rater_decision.strip(), "rater-selected"] if tag],
+        )
     return {"status": "ok", "message": "Review saved"}
 
 
@@ -1043,7 +1162,7 @@ def admin_ui():
           reviewList.innerHTML = items.length ? items.map(item => `
             <div class="item">
               <div><strong>${escapeHtml(item.extracted_claim || "No extracted claim stored")}</strong></div>
-              <div class="meta">${escapeHtml(item.system_verdict || "No verdict")} • ${escapeHtml(item.claim_status || "unknown")} • Updated ${escapeHtml(item.updated_at || item.created_at || "")}</div>
+              <div class="meta">AI: ${escapeHtml(item.system_verdict || "No verdict")} • Rater: ${escapeHtml(item.rater_decision || "Not selected")} • ${escapeHtml(item.claim_status || "unknown")} • Updated ${escapeHtml(item.updated_at || item.created_at || "")}</div>
               <div style="margin-top:8px;"><strong>Chosen evidence:</strong> <a href="${escapeHtml(item.selected_evidence_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.selected_evidence_title || item.selected_evidence_url || "Open link")}</a></div>
               <div class="meta">${escapeHtml(item.selected_evidence_snippet || "")}</div>
               <div style="margin-top:8px;"><strong>Post text:</strong> ${escapeHtml(item.post_text || "")}</div>
@@ -1173,12 +1292,16 @@ async def perform_fact_check(request: FactCheckRequest):
                 is_cached=True,
                 claim_status=metadata.get("claim_status", "factual_claim"),
                 claim_reason=metadata.get("claim_reason", ""),
+                detected_language=metadata.get("detected_language", "unknown"),
+                language_label=metadata.get("language_label", "Unknown"),
+                language_confidence=metadata.get("language_confidence", "low"),
             )
 
         logger.info("factcheck preparing claim extraction")
         claim_source_text = _extract_media_focus_text(request.text) or request.text
         if claim_source_text != request.text:
             logger.info("factcheck media-focused extraction selected text_preview=%r", claim_source_text[:120])
+        initial_language_context = _detect_language_context(request.text, claim_source_text)
 
         claim_status = "factual_claim"
         claim_reason = ""
@@ -1204,6 +1327,7 @@ async def perform_fact_check(request: FactCheckRequest):
             extracted_claim = selected_claim
         else:
             extracted_claim = extracted_claims[0] if extracted_claims else fallback_claim
+        language_context = _detect_language_context(request.text, extracted_claim)
         logger.info("factcheck active claim=%r", extracted_claim)
 
         suspected_author = _extract_suspected_author(request.text)
@@ -1268,6 +1392,7 @@ async def perform_fact_check(request: FactCheckRequest):
             original_text=request.text,
             suspected_author=suspected_author,
             prioritize_authorship=prioritize_authorship,
+            language_context=language_context,
         )
 
         safe_results = [
@@ -1309,6 +1434,9 @@ async def perform_fact_check(request: FactCheckRequest):
                     ],
                     "claim_status": claim_status,
                     "claim_reason": claim_reason,
+                    "detected_language": language_context.get("language", initial_language_context.get("language", "unknown")),
+                    "language_label": language_context.get("label", initial_language_context.get("label", "Unknown")),
+                    "language_confidence": language_context.get("confidence", initial_language_context.get("confidence", "low")),
                 },
             )
 
@@ -1322,6 +1450,9 @@ async def perform_fact_check(request: FactCheckRequest):
             is_cached=False,
             claim_status=claim_status,
             claim_reason=claim_reason,
+            detected_language=language_context.get("language", "unknown"),
+            language_label=language_context.get("label", "Unknown"),
+            language_confidence=language_context.get("confidence", "low"),
         )
     except HTTPException:
         raise

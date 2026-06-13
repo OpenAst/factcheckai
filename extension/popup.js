@@ -1,6 +1,6 @@
 // Configure your backend URL here.
 // For Coolify, use the public API app URL.
-const API_BASE_URL = 'http://jxr36a5v6auepw1fgh0x2b7c.68.168.208.98.sslip.io';
+const API_BASE_URL = 'https://factcheckai-api.onrender.com';
 const BACKEND_URL = `${API_BASE_URL}/factcheck`;
 const OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
 
@@ -11,14 +11,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
     const scanImageBtn = document.getElementById('scan-image-btn');
+    const pinBtn = document.getElementById('pin-btn');
     const checkBtn = document.getElementById('check-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
     const saveReviewStatus = document.getElementById('save-review-status');
+    const signalSection = document.getElementById('signal-section');
+    const signalBadges = document.getElementById('signal-badges');
+    const decisionSection = document.getElementById('decision-section');
+    const decisionButtons = document.getElementById('decision-buttons');
+    const openAllLinksBtn = document.getElementById('open-all-links-btn');
+    const copySourceVerdictBtn = document.getElementById('copy-source-verdict-btn');
 
     let extractedText = "";
     let currentFactCheckData = null;
     let currentSelectedClaim = "";
+    let currentSelectedEvidence = null;
+    let currentFinalDecision = "";
+    let rejectedEvidenceUrls = new Set();
 
     function setMiniStatus(message, isError = false) {
         saveReviewStatus.style.display = 'block';
@@ -32,6 +42,76 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!err) return 'Unknown error';
         if (typeof err === 'string') return err;
         return err.message || String(err);
+    }
+
+    function getDomain(url) {
+        try {
+            return new URL(url).hostname.replace(/^www\./, '');
+        } catch (_) {
+            return 'Unknown source';
+        }
+    }
+
+    function getSourceType(link) {
+        const domain = getDomain(link.url).toLowerCase();
+        const title = (link.title || '').toLowerCase();
+        if (domain.endsWith('.gov') || domain.endsWith('.mil') || title.includes('official')) return 'Official';
+        if (/(reuters|apnews|bbc|npr|pbs|afp|politico|bloomberg|guardian|cnn)\./.test(domain)) return 'News';
+        if (/(factcheck|snopes|politifact|leadstories|africacheck|stopfake|voxcheck)/.test(domain)) return 'Fact-check';
+        if (/(who\.int|un\.org|europa\.eu|worldbank\.org|imf\.org)/.test(domain)) return 'Institutional';
+        return 'Source';
+    }
+
+    function inferTrustSignals(data) {
+        const links = data.evidence_links || [];
+        const verdictText = (data.verdict_md || '').toLowerCase();
+        const directEvidenceCount = links.filter(link => {
+            const type = getSourceType(link);
+            return ['Official', 'Fact-check', 'Institutional', 'News'].includes(type);
+        }).length;
+        const hasOfficial = links.some(link => getSourceType(link) === 'Official');
+        const hasFactCheck = links.some(link => getSourceType(link) === 'Fact-check');
+        const uncertainty = /(unclear|not enough|insufficient|could not verify|no direct evidence|unverified|needs context)/i.test(verdictText);
+
+        let confidence = 'Medium confidence';
+        let className = 'badge-warn';
+        if (directEvidenceCount >= 2 && !uncertainty) {
+            confidence = 'High confidence';
+            className = 'badge-good';
+        } else if (links.length === 0 || uncertainty) {
+            confidence = 'Needs manual review';
+            className = 'badge-risk';
+        }
+
+        const signals = [{ label: confidence, className }];
+        if (data.language_label && data.language_label !== 'Unknown') {
+            const confidenceLabel = data.language_confidence ? ` (${data.language_confidence})` : '';
+            signals.push({ label: `Detected: ${data.language_label}${confidenceLabel}`, className: 'badge-signal' });
+        }
+        signals.push({ label: `${links.length} evidence link${links.length === 1 ? '' : 's'}`, className: links.length ? 'badge-signal' : 'badge-risk' });
+        if (hasOfficial) signals.push({ label: 'Official source found', className: 'badge-good' });
+        if (hasFactCheck) signals.push({ label: 'Fact-check source found', className: 'badge-good' });
+        if (!hasOfficial && !hasFactCheck && links.length) signals.push({ label: 'Review source quality', className: 'badge-warn' });
+        if (data.is_cached) signals.push({ label: 'Cached result', className: 'badge-warn' });
+        if (data.claim_status && data.claim_status !== 'factual_claim') signals.push({ label: data.claim_status.replace(/_/g, ' '), className: 'badge-risk' });
+        return signals;
+    }
+
+    function showTrustSignals(data) {
+        const signals = inferTrustSignals(data);
+        signalBadges.innerHTML = '';
+        signals.forEach(signal => {
+            const badge = document.createElement('span');
+            badge.className = `badge badge-signal ${signal.className}`;
+            badge.textContent = signal.label;
+            signalBadges.appendChild(badge);
+        });
+        signalSection.style.display = 'block';
+    }
+
+    function pickDefaultEvidence(data) {
+        const links = (data && data.evidence_links) || [];
+        return currentSelectedEvidence || links.find(link => !rejectedEvidenceUrls.has(link.url)) || links[0] || null;
     }
 
     async function readErrorDetail(response, fallbackMessage = 'Unknown backend error') {
@@ -53,13 +133,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         return `${status}: ${detail || fallbackMessage}`;
     }
 
-    async function saveSelectedEvidence(link) {
+    async function saveSelectedEvidence(link, finalDecision = currentFinalDecision) {
         if (!currentFactCheckData) {
             setMiniStatus('No fact-check result is loaded yet.', true);
             return;
         }
+        if ((!link || !link.url) && !finalDecision) {
+            setMiniStatus('Choose a best source before saving this review.', true);
+            return;
+        }
 
         try {
+            if (link && link.url) currentSelectedEvidence = link;
             const reviewUrl = BACKEND_URL.replace(/\/factcheck\/?$/, '/reviews');
             const resp = await fetch(reviewUrl, {
                 method: 'POST',
@@ -69,18 +154,155 @@ document.addEventListener('DOMContentLoaded', async () => {
                     extracted_claim: currentFactCheckData.extracted_claim || '',
                     claim_status: currentFactCheckData.claim_status || 'factual_claim',
                     verdict_md: currentFactCheckData.verdict_md || '',
-                    selected_evidence_url: link.url,
-                    selected_evidence_title: link.title || '',
-                    selected_evidence_snippet: link.snippet || '',
-                    evidence_links: currentFactCheckData.evidence_links || []
+                    selected_evidence_url: link?.url || '',
+                    selected_evidence_title: link?.title || '',
+                    selected_evidence_snippet: link?.snippet || '',
+                    evidence_links: currentFactCheckData.evidence_links || [],
+                    rater_decision: finalDecision || '',
+                    notes: finalDecision ? `Final decision: ${finalDecision}` : ''
                 })
             });
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.detail || 'Could not save selected evidence');
-            setMiniStatus('Selected evidence saved to the review database.');
+            setMiniStatus(finalDecision ? `Saved final decision: ${finalDecision}.` : 'Selected evidence saved to the review database.');
         } catch (err) {
             setMiniStatus(err.message || 'Could not save selected evidence.', true);
         }
+    }
+
+    function renderClaimOptions(data, extractedClaimBox, extractedClaimText) {
+        const byClaim = new Map();
+        (data.claim_options || []).forEach(option => {
+            if (option.claim) byClaim.set(option.claim, option.evidence_links || []);
+        });
+        (data.extracted_claims || []).forEach(claim => {
+            if (claim && !byClaim.has(claim)) byClaim.set(claim, []);
+        });
+        if (data.extracted_claim && !byClaim.has(data.extracted_claim)) {
+            byClaim.set(data.extracted_claim, []);
+        }
+
+        const claimEntries = Array.from(byClaim.entries()).filter(([claim]) => claim);
+        if (!claimEntries.length) return;
+
+        extractedClaimText.innerHTML = '';
+        claimEntries.forEach(([claim, evidenceLinks]) => {
+            const item = document.createElement('div');
+            item.className = `claim-option${claim === data.extracted_claim ? ' active' : ''}`;
+
+            const claimText = document.createElement('div');
+            claimText.textContent = claim;
+            claimText.style.cssText = 'margin-bottom:6px; color:#27343b; font-size:12px; line-height:1.35;';
+
+            const preview = document.createElement('div');
+            preview.className = 'hint-text';
+            preview.style.marginBottom = '6px';
+            const topLinks = (evidenceLinks || []).slice(0, 3);
+            preview.textContent = topLinks.length
+                ? topLinks.map(link => `${getSourceType(link)}: ${link.title || getDomain(link.url)}`).join(' | ')
+                : 'No preview evidence returned for this claim yet.';
+
+            const chooseBtn = document.createElement('button');
+            chooseBtn.textContent = claim === data.extracted_claim ? 'Selected Claim' : 'Check This Claim';
+            chooseBtn.className = 'retry-btn';
+            chooseBtn.style.cssText = 'width:auto; padding:4px 8px; font-size:11px;';
+            chooseBtn.disabled = claim === data.extracted_claim;
+            chooseBtn.addEventListener('click', () => {
+                currentSelectedClaim = claim;
+                checkBtn.click();
+            });
+
+            item.appendChild(claimText);
+            item.appendChild(preview);
+            item.appendChild(chooseBtn);
+            extractedClaimText.appendChild(item);
+        });
+        extractedClaimBox.style.display = 'block';
+    }
+
+    function renderDecisionButtons() {
+        const decisions = ['False', 'Misleading', 'True', 'Unverified', 'No Claim', 'Needs Review'];
+        decisionButtons.innerHTML = '';
+        decisions.forEach(decision => {
+            const btn = document.createElement('button');
+            btn.className = `decision-btn${decision === currentFinalDecision ? ' active' : ''}`;
+            btn.textContent = decision;
+            btn.addEventListener('click', async () => {
+                currentFinalDecision = decision;
+                Array.from(decisionButtons.children).forEach(child => child.classList.remove('active'));
+                btn.classList.add('active');
+                await saveSelectedEvidence(pickDefaultEvidence(currentFactCheckData), decision);
+            });
+            decisionButtons.appendChild(btn);
+        });
+        decisionSection.style.display = 'block';
+    }
+
+    function renderEvidenceLinks(data, evidenceLinksDiv) {
+        const links = data.evidence_links || [];
+        evidenceLinksDiv.innerHTML = '';
+        if (!links.length) return;
+
+        if (!currentSelectedEvidence) currentSelectedEvidence = links[0];
+
+        links.forEach(link => {
+            const item = document.createElement('div');
+            item.className = 'evidence-item';
+            if (currentSelectedEvidence && currentSelectedEvidence.url === link.url) item.classList.add('best');
+            if (rejectedEvidenceUrls.has(link.url)) item.classList.add('rejected');
+
+            const domain = document.createElement('span');
+            domain.className = 'source-domain';
+            domain.textContent = `${getSourceType(link)} | ${getDomain(link.url)}`;
+
+            const anchor = document.createElement('a');
+            anchor.href = link.url;
+            anchor.target = '_blank';
+            anchor.className = 'report-link';
+            anchor.style.cssText = 'font-weight:600; display:block; margin-bottom:3px;';
+            anchor.textContent = link.title || link.url;
+
+            const snippet = document.createElement('span');
+            snippet.style.cssText = 'font-size:11px; color:#555; display:block;';
+            snippet.textContent = link.snippet || '';
+
+            const bestBtn = document.createElement('button');
+            bestBtn.className = 'secondary-btn';
+            bestBtn.textContent = 'Best Source';
+            bestBtn.addEventListener('click', () => {
+                currentSelectedEvidence = link;
+                renderEvidenceLinks(currentFactCheckData, evidenceLinksDiv);
+                setMiniStatus('Best source selected. Final decision will save with this link.');
+            });
+
+            const rejectBtn = document.createElement('button');
+            rejectBtn.className = 'secondary-btn';
+            rejectBtn.textContent = rejectedEvidenceUrls.has(link.url) ? 'Restore Source' : 'Reject Source';
+            rejectBtn.addEventListener('click', () => {
+                if (rejectedEvidenceUrls.has(link.url)) {
+                    rejectedEvidenceUrls.delete(link.url);
+                } else {
+                    rejectedEvidenceUrls.add(link.url);
+                    if (currentSelectedEvidence && currentSelectedEvidence.url === link.url) {
+                        currentSelectedEvidence = links.find(candidate => !rejectedEvidenceUrls.has(candidate.url) && candidate.url !== link.url) || null;
+                    }
+                }
+                renderEvidenceLinks(currentFactCheckData, evidenceLinksDiv);
+            });
+
+            const saveBtn = document.createElement('button');
+            saveBtn.className = 'save-source-btn';
+            saveBtn.textContent = 'Save This Source';
+            saveBtn.addEventListener('click', () => saveSelectedEvidence(link));
+
+            item.appendChild(domain);
+            item.appendChild(anchor);
+            item.appendChild(snippet);
+            item.appendChild(bestBtn);
+            item.appendChild(rejectBtn);
+            item.appendChild(saveBtn);
+            evidenceLinksDiv.appendChild(item);
+        });
     }
 
     async function tryExtract() {
@@ -273,14 +495,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     retryBtn.addEventListener('click', tryExtract);
     scanImageBtn.addEventListener('click', scanImageText);
 
+    // Pin to page button
+    if (pinBtn) {
+        // Try to get current pinned state
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            const state = await chrome.tabs.sendMessage(tab.id, { action: 'isPinned' });
+            if (state && state.pinned) pinBtn.textContent = 'Unpin From Page';
+        } catch (e) {
+            // ignore - content script might not be available on this page
+        }
+
+        pinBtn.addEventListener('click', async () => {
+            try {
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                const resp = await chrome.tabs.sendMessage(tab.id, { action: 'togglePin' });
+                if (resp && resp.pinned) {
+                    pinBtn.textContent = 'Unpin From Page';
+                } else {
+                    pinBtn.textContent = 'Pin To Page';
+                }
+            } catch (err) {
+                setMiniStatus('Could not pin on this page: ' + (err.message || err), true);
+            }
+        });
+    }
+
     // 2. Click handler for check button
     checkBtn.addEventListener('click', async () => {
         checkBtn.style.display = 'none';
         loading.style.display = 'block';
+        loading.firstChild.textContent = 'Searching evidence and analyzing claim';
         resultDiv.style.display = 'none';
         copyBtn.style.display = 'none';
         cacheBadge.style.display = 'none';
         currentFactCheckData = null;
+        currentSelectedEvidence = null;
+        currentFinalDecision = "";
+        rejectedEvidenceUrls = new Set();
         saveReviewStatus.style.display = 'none';
 
         const extractedClaimBox = document.getElementById('extracted-claim-box');
@@ -292,8 +544,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Hide previous evidence
         extractedClaimBox.style.display = 'none';
         evidenceSection.style.display = 'none';
+        signalSection.style.display = 'none';
+        decisionSection.style.display = 'none';
         evidenceLinksDiv.innerHTML = '';
         extractedClaimText.innerHTML = '';
+        signalBadges.innerHTML = '';
+        decisionButtons.innerHTML = '';
 
         try {
             // Read current text from textarea (user might have edited it)
@@ -326,36 +582,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Show cache badge if applicable
             if (data.is_cached) cacheBadge.style.display = 'inline-block';
 
-            // Show extracted claim preview
-            if ((data.extracted_claims && data.extracted_claims.length > 0) || (data.extracted_claim && data.extracted_claim !== textToAnalyze)) {
-                const claimOptions = data.extracted_claims && data.extracted_claims.length > 0
-                    ? data.extracted_claims
-                    : [data.extracted_claim];
-                extractedClaimText.innerHTML = "";
-                claimOptions.forEach((claim) => {
-                    const row = document.createElement('div');
-                    row.style.cssText = 'margin-top:6px;';
-
-                    const claimText = document.createElement('div');
-                    claimText.textContent = claim;
-                    claimText.style.cssText = 'margin-bottom:4px; color:#333;';
-
-                    const chooseBtn = document.createElement('button');
-                    chooseBtn.textContent = claim === data.extracted_claim ? 'Selected Claim' : 'Check This Claim';
-                    chooseBtn.className = 'retry-btn';
-                    chooseBtn.style.cssText = 'width:auto; padding:4px 8px; font-size:11px;';
-                    chooseBtn.disabled = claim === data.extracted_claim;
-                    chooseBtn.addEventListener('click', () => {
-                        currentSelectedClaim = claim;
-                        checkBtn.click();
-                    });
-
-                    row.appendChild(claimText);
-                    row.appendChild(chooseBtn);
-                    extractedClaimText.appendChild(row);
-                });
-                extractedClaimBox.style.display = 'block';
-            }
+            renderClaimOptions(data, extractedClaimBox, extractedClaimText);
+            showTrustSignals(data);
 
             // Show verdict and copy button
             resultDiv.innerHTML = formatMarkdown(data.verdict_md);
@@ -370,40 +598,40 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setTimeout(() => copyBtn.innerText = orig, 2000);
             };
 
+            renderDecisionButtons();
+
             // Render evidence links
             if (data.evidence_links && data.evidence_links.length > 0) {
                 const allUrls = data.evidence_links.map(l => l.url).join('\n');
-
-                data.evidence_links.forEach(link => {
-                    const item = document.createElement('div');
-                    item.style.cssText = 'margin-bottom:8px; padding:8px; background:#f5f5f5; border-radius:6px;';
-                    const anchor = document.createElement('a');
-                    anchor.href = link.url;
-                    anchor.target = '_blank';
-                    anchor.className = 'report-link';
-                    anchor.style.cssText = 'font-weight:600; display:block; margin-bottom:3px;';
-                    anchor.textContent = link.title;
-
-                    const snippet = document.createElement('span');
-                    snippet.style.cssText = 'font-size:11px; color:#555; display:block;';
-                    snippet.textContent = link.snippet || '';
-
-                    const saveBtn = document.createElement('button');
-                    saveBtn.className = 'save-source-btn';
-                    saveBtn.textContent = 'Save This Source';
-                    saveBtn.addEventListener('click', () => saveSelectedEvidence(link));
-
-                    item.appendChild(anchor);
-                    item.appendChild(snippet);
-                    item.appendChild(saveBtn);
-                    evidenceLinksDiv.appendChild(item);
-                });
+                renderEvidenceLinks(data, evidenceLinksDiv);
 
                 copyLinksBtn.onclick = () => {
                     navigator.clipboard.writeText(allUrls);
                     const orig = copyLinksBtn.innerText;
                     copyLinksBtn.innerText = "Copied!";
                     setTimeout(() => copyLinksBtn.innerText = orig, 2000);
+                };
+
+                openAllLinksBtn.onclick = () => {
+                    data.evidence_links
+                        .filter(link => !rejectedEvidenceUrls.has(link.url))
+                        .slice(0, 5)
+                        .forEach(link => chrome.tabs.create({ url: link.url, active: false }));
+                };
+
+                copySourceVerdictBtn.onclick = () => {
+                    const best = pickDefaultEvidence(currentFactCheckData);
+                    const text = [
+                        `Claim: ${currentFactCheckData.extracted_claim || ''}`,
+                        `Decision: ${currentFinalDecision || 'Not selected'}`,
+                        `Best source: ${best ? `${best.title || best.url} - ${best.url}` : 'None selected'}`,
+                        '',
+                        currentFactCheckData.verdict_md || ''
+                    ].join('\n');
+                    navigator.clipboard.writeText(text);
+                    const orig = copySourceVerdictBtn.innerText;
+                    copySourceVerdictBtn.innerText = 'Copied!';
+                    setTimeout(() => copySourceVerdictBtn.innerText = orig, 2000);
                 };
 
                 evidenceSection.style.display = 'block';

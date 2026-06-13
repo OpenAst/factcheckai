@@ -45,6 +45,7 @@ def init_db():
             extracted_claim TEXT,
             claim_status TEXT,
             system_verdict TEXT,
+            rater_decision TEXT,
             verdict_markdown TEXT,
             selected_evidence_url TEXT,
             selected_evidence_title TEXT,
@@ -59,6 +60,10 @@ def init_db():
     existing_claim_cache_columns = {row[1] for row in cursor.fetchall()}
     if "metadata_json" not in existing_claim_cache_columns:
         cursor.execute("ALTER TABLE claim_cache ADD COLUMN metadata_json TEXT")
+    cursor.execute("PRAGMA table_info(factcheck_reviews)")
+    existing_review_columns = {row[1] for row in cursor.fetchall()}
+    if "rater_decision" not in existing_review_columns:
+        cursor.execute("ALTER TABLE factcheck_reviews ADD COLUMN rater_decision TEXT")
     conn.commit()
     conn.close()
 
@@ -214,6 +219,7 @@ class ReviewService:
         extracted_claim: str = "",
         claim_status: str = "",
         system_verdict: str = "",
+        rater_decision: str = "",
         verdict_markdown: str = "",
         selected_evidence_url: str = "",
         selected_evidence_title: str = "",
@@ -231,16 +237,17 @@ class ReviewService:
         cursor.execute(
             """
             INSERT INTO factcheck_reviews (
-                post_hash, post_text, extracted_claim, claim_status, system_verdict,
+                post_hash, post_text, extracted_claim, claim_status, system_verdict, rater_decision,
                 verdict_markdown, selected_evidence_url, selected_evidence_title,
                 selected_evidence_snippet, all_evidence_json, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(post_hash) DO UPDATE SET
                 post_text=excluded.post_text,
                 extracted_claim=excluded.extracted_claim,
                 claim_status=excluded.claim_status,
                 system_verdict=excluded.system_verdict,
+                rater_decision=excluded.rater_decision,
                 verdict_markdown=excluded.verdict_markdown,
                 selected_evidence_url=excluded.selected_evidence_url,
                 selected_evidence_title=excluded.selected_evidence_title,
@@ -255,6 +262,7 @@ class ReviewService:
                 extracted_claim,
                 claim_status,
                 system_verdict,
+                rater_decision,
                 verdict_markdown,
                 selected_evidence_url,
                 selected_evidence_title,
@@ -280,7 +288,7 @@ class ReviewService:
             cursor.execute(
                 """
                 SELECT id, post_hash, post_text, extracted_claim, claim_status, system_verdict,
-                       verdict_markdown, selected_evidence_url, selected_evidence_title,
+                       rater_decision, verdict_markdown, selected_evidence_url, selected_evidence_title,
                        selected_evidence_snippet, all_evidence_json, notes, created_at, updated_at
                 FROM factcheck_reviews
                 WHERE post_text LIKE ?
@@ -297,7 +305,7 @@ class ReviewService:
             cursor.execute(
                 """
                 SELECT id, post_hash, post_text, extracted_claim, claim_status, system_verdict,
-                       verdict_markdown, selected_evidence_url, selected_evidence_title,
+                       rater_decision, verdict_markdown, selected_evidence_url, selected_evidence_title,
                        selected_evidence_snippet, all_evidence_json, notes, created_at, updated_at
                 FROM factcheck_reviews
                 ORDER BY updated_at DESC, created_at DESC, id DESC
@@ -309,7 +317,7 @@ class ReviewService:
         out = []
         for row in rows:
             try:
-                all_evidence = json.loads(row[10]) if row[10] else []
+                all_evidence = json.loads(row[11]) if row[11] else []
             except Exception:
                 all_evidence = []
             out.append({
@@ -319,13 +327,14 @@ class ReviewService:
                 "extracted_claim": row[3] or "",
                 "claim_status": row[4] or "",
                 "system_verdict": row[5] or "",
-                "verdict_markdown": row[6] or "",
-                "selected_evidence_url": row[7] or "",
-                "selected_evidence_title": row[8] or "",
-                "selected_evidence_snippet": row[9] or "",
+                "rater_decision": row[6] or "",
+                "verdict_markdown": row[7] or "",
+                "selected_evidence_url": row[8] or "",
+                "selected_evidence_title": row[9] or "",
+                "selected_evidence_snippet": row[10] or "",
                 "all_evidence": all_evidence,
-                "notes": row[11] or "",
-                "created_at": row[12] or "",
-                "updated_at": row[13] or "",
+                "notes": row[12] or "",
+                "created_at": row[13] or "",
+                "updated_at": row[14] or "",
             })
         return out
