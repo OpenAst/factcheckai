@@ -42,8 +42,26 @@ function applyOverlayLayout() {
 function createOverlay() {
     if (__factcheck_overlay_iframe) return;
 
-    const iframe = document.createElement('iframe');
-    iframe.src = chrome.runtime.getURL('popup.html');
+        const iframe = document.createElement('iframe');
+        // Use srcdoc to avoid Chrome blocking extension pages inside iframes.
+        // The iframe content is a lightweight placeholder UI that will be
+        // bridged to the content script for full functionality later.
+        iframe.srcdoc = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{margin:0;font-family:system-ui,Segoe UI,Helvetica,Arial;background:#f4f7f6;color:#2c3e50}
+.panel{box-sizing:border-box;padding:12px;background:#fff;border-radius:8px;height:100%;display:flex;flex-direction:column}
+.title{font-weight:700;margin-bottom:8px} .content{flex:1;display:flex;align-items:center;justify-content:center;color:#999}
+</style></head><body><div class="panel"><div class="title">SRT Fact-Check AI</div><div class="content">Panel loaded — interaction via extension bridge</div></div>
+<script>
+    // Notify parent that iframe is ready
+    try{parent.postMessage({factcheckIframeReady:true}, '*');}catch(e){}
+    // Forward clicks to parent for demo purposes
+    window.addEventListener('message', (e)=>{
+        if(e?.data?.action === 'close'){
+            try{parent.postMessage({factcheckIframeClosed:true}, '*');}catch(_){}
+        }
+    });
+</script></body></html>`;
     iframe.id = 'factcheck-overlay-iframe';
     iframe.style.position = 'fixed';
     iframe.style.bottom = '20px';

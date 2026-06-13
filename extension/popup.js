@@ -535,11 +535,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 if (resp === undefined) {
                     // Content script not present; inject/remove overlay directly into the page
-                    const extensionUrl = chrome.runtime.getURL('popup.html');
+                    // Content script not present — inject a srcdoc iframe to avoid
+                    // Chrome blocking chrome-extension:// pages inside iframes.
+                    const srcdoc = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{margin:0;font-family:system-ui,Segoe UI,Helvetica,Arial;background:#f4f7f6;color:#2c3e50}
+.panel{box-sizing:border-box;padding:12px;background:#fff;border-radius:8px;height:100%;display:flex;flex-direction:column}
+.title{font-weight:700;margin-bottom:8px} .content{flex:1;display:flex;align-items:center;justify-content:center;color:#999}
+</style></head><body><div class="panel"><div class="title">SRT Fact-Check AI</div><div class="content">Panel loaded — interaction via extension bridge</div></div>
+<script>
+  try{parent.postMessage({factcheckIframeReady:true}, '*');}catch(e){}
+  window.addEventListener('message', (e)=>{
+    if(e?.data?.action === 'close'){
+      try{parent.postMessage({factcheckIframeClosed:true}, '*');}catch(_){}
+    }
+  });
+</script></body></html>`;
                     try {
                         await chrome.scripting.executeScript({
                             target: { tabId: tab.id },
-                            func: (url) => {
+                            func: (doc) => {
                                 const existing = document.getElementById('factcheck-overlay-iframe');
                                 if (existing) {
                                     const tb = document.getElementById('factcheck-overlay-toolbar');
@@ -548,7 +563,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                                     return { pinned: false };
                                 }
                                 const iframe = document.createElement('iframe');
-                                iframe.src = url;
                                 iframe.id = 'factcheck-overlay-iframe';
                                 iframe.style.position = 'fixed';
                                 iframe.style.right = '20px';
@@ -559,6 +573,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 iframe.style.border = '1px solid rgba(0,0,0,0.15)';
                                 iframe.style.borderRadius = '8px';
                                 iframe.style.boxShadow = '0 6px 20px rgba(0,0,0,0.25)';
+                                iframe.srcdoc = doc;
                                 document.documentElement.appendChild(iframe);
 
                                 const toolbar = document.createElement('div');
@@ -575,10 +590,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 close.addEventListener('click', () => { iframe.remove(); toolbar.remove(); });
                                 toolbar.appendChild(close);
                                 document.documentElement.appendChild(toolbar);
-
                                 return { pinned: true };
                             },
-                            args: [extensionUrl]
+                            args: [srcdoc]
                         });
                         pinBtn.textContent = 'Unpin From Page';
                         return;

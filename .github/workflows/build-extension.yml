@@ -1,0 +1,25 @@
+name: Build Extension Zip
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Zip extension folder
+        run: |
+          cd $GITHUB_WORKSPACE
+          if [ -f extension.zip ]; then rm extension.zip; fi
+          zip -r extension.zip extension
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension.zip
+          path: extension.zip
