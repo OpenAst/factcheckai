@@ -1,8 +1,46 @@
-// Configure your backend URL here.
-// For Coolify, use the public API app URL.
-const API_BASE_URL = 'https://factcheckai-api.onrender.com';
-const BACKEND_URL = `${API_BASE_URL}/factcheck`;
-const OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
+const DEFAULT_API_BASE_URL = 'https://factcheckai.oneclyq.com';
+let API_BASE_URL = DEFAULT_API_BASE_URL;
+let BACKEND_URL = `${API_BASE_URL}/factcheck`;
+let OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
+
+function normalizeBaseUrl(value) {
+    if (!value) return DEFAULT_API_BASE_URL;
+    return value.trim().replace(/\/+$/, '');
+}
+
+function updateBackendUrls(baseUrl) {
+    API_BASE_URL = normalizeBaseUrl(baseUrl || DEFAULT_API_BASE_URL);
+    BACKEND_URL = `${API_BASE_URL}/factcheck`;
+    OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
+}
+
+function isValidBackendUrl(url) {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch (_err) {
+        return false;
+    }
+}
+
+function loadBackendUrl() {
+    return new Promise(resolve => {
+        chrome.storage.local.get({ backendUrl: DEFAULT_API_BASE_URL }, data => {
+            const url = data.backendUrl || DEFAULT_API_BASE_URL;
+            updateBackendUrls(url);
+            resolve(url);
+        });
+    });
+}
+
+function saveBackendUrl(url) {
+    return new Promise(resolve => {
+        chrome.storage.local.set({ backendUrl: normalizeBaseUrl(url) }, () => {
+            updateBackendUrls(url);
+            resolve();
+        });
+    });
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     const cacheBadge = document.getElementById('cache-badge');
@@ -19,6 +57,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     const signalSection = document.getElementById('signal-section');
     const signalBadges = document.getElementById('signal-badges');
     const decisionSection = document.getElementById('decision-section');
+    const backendUrlInput = document.getElementById('backend-url-input');
+    const saveBackendUrlBtn = document.getElementById('save-backend-url-btn');
+
+    const storedBackendUrl = await loadBackendUrl();
+    backendUrlInput.value = storedBackendUrl;
+
+    saveBackendUrlBtn.addEventListener('click', async () => {
+        const newUrl = backendUrlInput.value.trim();
+        if (!isValidBackendUrl(newUrl)) {
+            setMiniStatus('Invalid backend URL. Use http:// or https://.', true);
+            return;
+        }
+        await saveBackendUrl(newUrl);
+        setMiniStatus(`Backend URL saved: ${API_BASE_URL}`);
+    });
+
+    backendUrlInput.addEventListener('keydown', async event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            saveBackendUrlBtn.click();
+        }
+    });
+
     const decisionButtons = document.getElementById('decision-buttons');
     const openAllLinksBtn = document.getElementById('open-all-links-btn');
     const copySourceVerdictBtn = document.getElementById('copy-source-verdict-btn');
@@ -512,7 +573,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 try {
                     const check = await chrome.scripting.executeScript({
                         target: { tabId: tab.id },
-                        func: () => !!document.getElementById('factcheck-overlay-iframe')
+                        func: () => !!document.getElementById('factcheck-overlay-root')
                     });
                     if (check && check[0] && check[0].result) pinBtn.textContent = 'Unpin From Page';
                 } catch (_) {
@@ -534,65 +595,79 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 if (resp === undefined) {
-                    // Content script not present; inject/remove overlay directly into the page
-                    // Content script not present — inject a srcdoc iframe to avoid
-                    // Chrome blocking chrome-extension:// pages inside iframes.
-                    const srcdoc = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{margin:0;font-family:system-ui,Segoe UI,Helvetica,Arial;background:#f4f7f6;color:#2c3e50}
-.panel{box-sizing:border-box;padding:12px;background:#fff;border-radius:8px;height:100%;display:flex;flex-direction:column}
-.title{font-weight:700;margin-bottom:8px} .content{flex:1;display:flex;align-items:center;justify-content:center;color:#999}
-</style></head><body><div class="panel"><div class="title">SRT Fact-Check AI</div><div class="content">Panel loaded — interaction via extension bridge</div></div>
-<script>
-  try{parent.postMessage({factcheckIframeReady:true}, '*');}catch(e){}
-  window.addEventListener('message', (e)=>{
-    if(e?.data?.action === 'close'){
-      try{parent.postMessage({factcheckIframeClosed:true}, '*');}catch(_){}
-    }
-  });
-</script></body></html>`;
+                    // Content script not present; inject/remove overlay directly into the page.
                     try {
                         await chrome.scripting.executeScript({
                             target: { tabId: tab.id },
-                            func: (doc) => {
-                                const existing = document.getElementById('factcheck-overlay-iframe');
+                            func: () => {
+                                const existing = document.getElementById('factcheck-overlay-root');
+                                const existingToolbar = document.getElementById('factcheck-overlay-toolbar');
                                 if (existing) {
-                                    const tb = document.getElementById('factcheck-overlay-toolbar');
                                     existing.remove();
-                                    if (tb) tb.remove();
+                                    if (existingToolbar) existingToolbar.remove();
                                     return { pinned: false };
                                 }
-                                const iframe = document.createElement('iframe');
-                                iframe.id = 'factcheck-overlay-iframe';
-                                iframe.style.position = 'fixed';
-                                iframe.style.right = '20px';
-                                iframe.style.bottom = '20px';
-                                iframe.style.width = '360px';
-                                iframe.style.height = '500px';
-                                iframe.style.zIndex = 2147483647;
-                                iframe.style.border = '1px solid rgba(0,0,0,0.15)';
-                                iframe.style.borderRadius = '8px';
-                                iframe.style.boxShadow = '0 6px 20px rgba(0,0,0,0.25)';
-                                iframe.srcdoc = doc;
-                                document.documentElement.appendChild(iframe);
+
+                                const root = document.createElement('div');
+                                root.id = 'factcheck-overlay-root';
+                                root.style.position = 'fixed';
+                                root.style.right = '20px';
+                                root.style.bottom = '20px';
+                                root.style.zIndex = '2147483647';
+                                root.style.border = '1px solid rgba(0,0,0,0.15)';
+                                root.style.borderRadius = '12px';
+                                root.style.boxShadow = '0 10px 30px rgba(0,0,0,0.25)';
+                                root.style.background = '#fff';
+                                root.style.display = 'flex';
+                                root.style.flexDirection = 'column';
+                                root.style.width = '360px';
+                                root.style.height = '500px';
+                                root.style.overflow = 'hidden';
+                                root.style.fontFamily = 'system-ui,Segoe UI,Helvetica,Arial,sans-serif';
+
+                                const body = document.createElement('div');
+                                body.style.flex = '1';
+                                body.style.padding = '16px';
+                                body.style.background = '#f4f7f6';
+                                body.style.display = 'flex';
+                                body.style.alignItems = 'center';
+                                body.style.justifyContent = 'center';
+                                body.style.color = '#666';
+                                body.textContent = 'Pinned view active. Use the extension popup to reopen the UI.';
+                                root.appendChild(body);
 
                                 const toolbar = document.createElement('div');
                                 toolbar.id = 'factcheck-overlay-toolbar';
                                 toolbar.style.position = 'fixed';
                                 toolbar.style.right = '20px';
-                                toolbar.style.bottom = (20 + 500 + 8) + 'px';
-                                toolbar.style.zIndex = 2147483647;
+                                toolbar.style.bottom = '528px';
+                                toolbar.style.zIndex = '2147483647';
+                                toolbar.style.display = 'flex';
+                                toolbar.style.gap = '6px';
+                                toolbar.style.alignItems = 'center';
+                                toolbar.style.padding = '6px';
+                                toolbar.style.borderRadius = '8px';
+                                toolbar.style.background = '#24313a';
+                                toolbar.style.boxShadow = '0 6px 18px rgba(0,0,0,0.18)';
+
                                 const close = document.createElement('button');
                                 close.textContent = 'Close';
                                 close.style.padding = '6px 10px';
                                 close.style.borderRadius = '6px';
+                                close.style.border = '1px solid rgba(255,255,255,0.18)';
+                                close.style.background = '#fff';
+                                close.style.color = '#24313a';
                                 close.style.cursor = 'pointer';
-                                close.addEventListener('click', () => { iframe.remove(); toolbar.remove(); });
+                                close.addEventListener('click', () => {
+                                    root.remove();
+                                    toolbar.remove();
+                                });
                                 toolbar.appendChild(close);
+
+                                document.documentElement.appendChild(root);
                                 document.documentElement.appendChild(toolbar);
                                 return { pinned: true };
-                            },
-                            args: [srcdoc]
+                            }
                         });
                         pinBtn.textContent = 'Unpin From Page';
                         return;
@@ -600,7 +675,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                         throw err;
                     }
                 }
-
                 if (resp && resp.pinned) {
                     pinBtn.textContent = 'Unpin From Page';
                 } else {

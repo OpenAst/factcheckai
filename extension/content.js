@@ -1,6 +1,6 @@
 // content.js
 // Listen for requests from the popup
-let __factcheck_overlay_iframe = null;
+let __factcheck_overlay_root = null;
 let __factcheck_overlay_toolbar = null;
 const OVERLAY_STATE_KEY = '__factcheck_overlay_state';
 
@@ -19,63 +19,50 @@ function saveOverlayState(state) {
 }
 
 function applyOverlayLayout() {
-    if (!__factcheck_overlay_iframe || !__factcheck_overlay_toolbar) return;
+    if (!__factcheck_overlay_root || !__factcheck_overlay_toolbar) return;
     const state = { dock: 'right', minimized: false, ...getOverlayState() };
     const width = Math.min(430, Math.max(380, Math.floor(window.innerWidth * 0.32)));
     const height = Math.min(650, Math.max(500, window.innerHeight - 90));
     const sideProp = state.dock === 'left' ? 'left' : 'right';
     const otherSideProp = state.dock === 'left' ? 'right' : 'left';
 
-    [__factcheck_overlay_iframe, __factcheck_overlay_toolbar].forEach(el => {
+    [__factcheck_overlay_root, __factcheck_overlay_toolbar].forEach(el => {
         el.style[sideProp] = '20px';
         el.style[otherSideProp] = '';
     });
 
-    __factcheck_overlay_iframe.style.width = `${width}px`;
-    __factcheck_overlay_iframe.style.height = `${height}px`;
-    __factcheck_overlay_iframe.style.bottom = '20px';
-    __factcheck_overlay_iframe.style.display = state.minimized ? 'none' : 'block';
+    __factcheck_overlay_root.style.width = `${width}px`;
+    __factcheck_overlay_root.style.height = `${height}px`;
+    __factcheck_overlay_root.style.bottom = '20px';
+    __factcheck_overlay_root.style.display = state.minimized ? 'none' : 'flex';
 
     __factcheck_overlay_toolbar.style.bottom = state.minimized ? '20px' : `${20 + height + 8}px`;
 }
 
 function createOverlay() {
-    if (__factcheck_overlay_iframe) return;
+    if (__factcheck_overlay_root) return;
 
-        const iframe = document.createElement('iframe');
-        // Use srcdoc to avoid Chrome blocking extension pages inside iframes.
-        // The iframe content is a lightweight placeholder UI that will be
-        // bridged to the content script for full functionality later.
-        iframe.srcdoc = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{margin:0;font-family:system-ui,Segoe UI,Helvetica,Arial;background:#f4f7f6;color:#2c3e50}
-.panel{box-sizing:border-box;padding:12px;background:#fff;border-radius:8px;height:100%;display:flex;flex-direction:column}
-.title{font-weight:700;margin-bottom:8px} .content{flex:1;display:flex;align-items:center;justify-content:center;color:#999}
-</style></head><body><div class="panel"><div class="title">SRT Fact-Check AI</div><div class="content">Panel loaded — interaction via extension bridge</div></div>
-<script>
-    // Notify parent that iframe is ready
-    try{parent.postMessage({factcheckIframeReady:true}, '*');}catch(e){}
-    // Forward clicks to parent for demo purposes
-    window.addEventListener('message', (e)=>{
-        if(e?.data?.action === 'close'){
-            try{parent.postMessage({factcheckIframeClosed:true}, '*');}catch(_){}
-        }
-    });
-</script></body></html>`;
-    iframe.id = 'factcheck-overlay-iframe';
-    iframe.style.position = 'fixed';
-    iframe.style.bottom = '20px';
-    iframe.style.zIndex = 2147483647;
-    iframe.style.border = '1px solid rgba(0,0,0,0.15)';
-    iframe.style.borderRadius = '8px';
-    iframe.style.boxShadow = '0 6px 20px rgba(0,0,0,0.25)';
-    iframe.style.background = '#fff';
+    const root = document.createElement('div');
+    root.id = 'factcheck-overlay-root';
+    root.style.position = 'fixed';
+    root.style.right = '20px';
+    root.style.bottom = '20px';
+    root.style.zIndex = '2147483647';
+    root.style.border = '1px solid rgba(0,0,0,0.15)';
+    root.style.borderRadius = '12px';
+    root.style.boxShadow = '0 10px 30px rgba(0,0,0,0.25)';
+    root.style.background = '#fff';
+    root.style.display = 'flex';
+    root.style.flexDirection = 'column';
+    root.style.width = '360px';
+    root.style.height = '500px';
+    root.style.overflow = 'hidden';
+    root.style.fontFamily = 'system-ui,Segoe UI,Helvetica,Arial,sans-serif';
 
-    // Toolbar lets reviewers keep the panel out of the way without reopening the extension menu.
     const toolbar = document.createElement('div');
     toolbar.id = 'factcheck-overlay-toolbar';
     toolbar.style.position = 'fixed';
-    toolbar.style.zIndex = 2147483647;
+    toolbar.style.zIndex = '2147483647';
     toolbar.style.display = 'flex';
     toolbar.style.gap = '6px';
     toolbar.style.alignItems = 'center';
@@ -115,25 +102,35 @@ function createOverlay() {
     });
 
     const closeBtn = makeButton('Close');
-    closeBtn.addEventListener('click', () => removeOverlay());
+    closeBtn.addEventListener('click', removeOverlay);
 
     toolbar.appendChild(sideBtn);
     toolbar.appendChild(minimizeBtn);
     toolbar.appendChild(closeBtn);
 
-    document.documentElement.appendChild(iframe);
+    const body = document.createElement('div');
+    body.style.flex = '1';
+    body.style.padding = '16px';
+    body.style.background = '#f4f7f6';
+    body.style.display = 'flex';
+    body.style.alignItems = 'center';
+    body.style.justifyContent = 'center';
+    body.style.color = '#666';
+    body.textContent = 'Pinned view active. Use the extension popup to reopen the UI.';
+
+    root.appendChild(body);
+    document.documentElement.appendChild(root);
     document.documentElement.appendChild(toolbar);
 
-    __factcheck_overlay_iframe = iframe;
+    __factcheck_overlay_root = root;
     __factcheck_overlay_toolbar = toolbar;
     applyOverlayLayout();
     window.addEventListener('resize', applyOverlayLayout);
 }
-
 function removeOverlay() {
-    if (__factcheck_overlay_iframe) {
-        __factcheck_overlay_iframe.remove();
-        __factcheck_overlay_iframe = null;
+    if (__factcheck_overlay_root) {
+        __factcheck_overlay_root.remove();
+        __factcheck_overlay_root = null;
     }
     if (__factcheck_overlay_toolbar) {
         __factcheck_overlay_toolbar.remove();
@@ -151,8 +148,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         if (request.action === 'togglePin') {
-            if (__factcheck_overlay_iframe) removeOverlay(); else createOverlay();
-            sendResponse({ pinned: !!__factcheck_overlay_iframe });
+            if (__factcheck_overlay_root) removeOverlay(); else createOverlay();
+            sendResponse({ pinned: !!__factcheck_overlay_root });
             return true;
         }
 
@@ -169,7 +166,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         if (request.action === 'isPinned') {
-            sendResponse({ pinned: !!__factcheck_overlay_iframe });
+            sendResponse({ pinned: !!__factcheck_overlay_root });
             return true;
         }
     }
@@ -190,29 +187,21 @@ function extractSrtContent() {
         return null;
     }
 
-    // 1. Priority: "Content In Review"
-    const inReview = findByText("Content In Review");
+    const inReview = findByText('Content In Review');
     if (inReview && inReview.length > 0) return inReview;
 
-    // 2. Priority: "Transcript"
-    const transcript = findByText("Transcript");
+    const transcript = findByText('Transcript');
     if (transcript && transcript.length > 5) return transcript;
 
-    // 3. Fallback: Any large text blocks (for internal tool custom layouts)
     const largeBlocks = allElements
         .filter(el => {
-            // Only direct text-containing elements to avoid capturing the whole <body>
             if (el.children.length > 0) return false;
             const text = el.innerText.trim();
-            return text.length > 50 && !text.includes("Detecting content");
+            return text.length > 50 && !text.includes('Detecting content');
         })
         .map(el => el.innerText.trim());
 
-    if (largeBlocks.length > 0) {
-        // Return the first significant block (usually the claim or the post body)
-        return largeBlocks[0];
-    }
+    if (largeBlocks.length > 0) return largeBlocks[0];
 
-    // 4. Fallback: Selected text or prompt
-    return window.getSelection().toString().trim() || "No clear claim detected. Please select the text manually.";
+    return window.getSelection().toString().trim() || 'No clear claim detected. Please select the text manually.';
 }
