@@ -8,6 +8,8 @@ from typing import Optional
 import easyocr
 import numpy as np
 from PIL import Image
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .logging_config import configure_logging
 from .ocr_queue import get_ocr_job_payload, is_ocr_queue_available, pop_ocr_job, update_ocr_job
@@ -96,29 +98,36 @@ def run_worker() -> None:
 
     logger.info("ocr worker started")
     while True:
-        job_id = pop_ocr_job(timeout=5)
-        if not job_id:
-            continue
-
-        payload = get_ocr_job_payload(job_id)
-        if not payload:
-            continue
-
-        image_data = payload.get("image_data", "")
-        if not image_data:
-            update_ocr_job(job_id, status="failed", error="Missing image data")
-            continue
-
         try:
-            logger.info("ocr job processing job_id=%s", job_id)
-            update_ocr_job(job_id, status="processing")
-            result_text = _extract_text(image_data)
-            update_ocr_job(job_id, status="completed", result_text=result_text)
-            logger.info("ocr job completed job_id=%s result_chars=%s", job_id, len(result_text))
-        except Exception as exc:
-            update_ocr_job(job_id, status="failed", error=str(exc))
-            logger.exception("ocr job failed job_id=%s error=%s", job_id, exc)
-            time.sleep(1)
+            job_id = pop_ocr_job(timeout=5)
+            if not job_id:
+                continue
+
+            payload = get_ocr_job_payload(job_id)
+            if not payload:
+                continue
+
+            image_data = payload.get("image_data", "")
+            if not image_data:
+                update_ocr_job(job_id, status="failed", error="Missing image data")
+                continue
+
+            try:
+                logger.info("ocr job processing job_id=%s", job_id)
+                update_ocr_job(job_id, status="processing")
+                result_text = _extract_text(image_data)
+                update_ocr_job(job_id, status="completed", result_text=result_text)
+                logger.info("ocr job completed job_id=%s result_chars=%s", job_id, len(result_text))
+            except Exception as exc:
+                try:
+                    update_ocr_job(job_id, status="failed", error=str(exc))
+                except (RedisConnectionError, RedisTimeoutError):
+                    logger.warning("could not update failed OCR job status due to Redis connectivity", exc_info=True)
+                logger.exception("ocr job failed job_id=%s error=%s", job_id, exc)
+                time.sleep(1)
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            logger.warning("redis temporarily unavailable for OCR worker: %s", exc)
+            time.sleep(5)
 
 
 if __name__ == "__main__":

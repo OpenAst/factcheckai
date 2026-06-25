@@ -8,6 +8,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CACHE_DB_PATH: /app/storage/cache.db
       REDIS_URL: redis://redis:6379/0
+      REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: 5
+      REDIS_SOCKET_TIMEOUT_SECONDS: 15
       OCR_QUEUE_NAME: ocr_jobs
       OCR_JOB_TTL_SECONDS: 1800
       GEMINI_API_KEY: ${GEMINI_API_KEY}
@@ -18,7 +20,7 @@ services:
       GUIDANCE_PDF_PATHS: ${GUIDANCE_PDF_PATHS:-}
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     expose:
       - "8000"
     volumes:
@@ -41,6 +43,8 @@ services:
       target: worker
     environment:
       REDIS_URL: redis://redis:6379/0
+      REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: 5
+      REDIS_SOCKET_TIMEOUT_SECONDS: 15
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OCR_QUEUE_NAME: ocr_jobs
       OCR_JOB_TTL_SECONDS: 1800
@@ -50,7 +54,7 @@ services:
       EASYOCR_MODEL_DIR: /app/storage/easyocr
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - worker-models:/app/storage/easyocr
     restart: unless-stopped
@@ -60,6 +64,14 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:

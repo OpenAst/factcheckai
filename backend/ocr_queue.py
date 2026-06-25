@@ -10,6 +10,8 @@ from redis import Redis
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 OCR_QUEUE_NAME = os.getenv("OCR_QUEUE_NAME", "ocr_jobs")
 OCR_JOB_TTL_SECONDS = int(os.getenv("OCR_JOB_TTL_SECONDS", "1800"))
+REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS = int(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS", "5"))
+REDIS_SOCKET_TIMEOUT_SECONDS = int(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "15"))
 
 _redis_client: Optional[Redis] = None
 
@@ -19,7 +21,14 @@ def _get_redis() -> Redis:
     if _redis_client is None:
         if not REDIS_URL:
             raise RuntimeError("REDIS_URL is not configured")
-        _redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+        _redis_client = Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+            health_check_interval=30,
+            retry_on_timeout=True,
+        )
     return _redis_client
 
 
