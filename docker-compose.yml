@@ -41,6 +41,7 @@ services:
     build:
       context: .
       target: worker
+    command: sleep infinity
     environment:
       REDIS_URL: redis://redis:6379/0
       REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: 5
@@ -57,7 +58,7 @@ services:
         condition: service_healthy
     volumes:
       - worker-models:/app/storage/easyocr
-    restart: unless-stopped
+    restart: "no"
 
   redis:
     image: redis:7-alpine
@@ -72,7 +73,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+    restart: "no"
 
 volumes:
   api-data:
