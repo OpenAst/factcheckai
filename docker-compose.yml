@@ -37,29 +37,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  worker:
-    build:
-      context: .
-      target: worker
-    command: sleep infinity
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: 5
-      REDIS_SOCKET_TIMEOUT_SECONDS: 15
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OCR_QUEUE_NAME: ocr_jobs
-      OCR_JOB_TTL_SECONDS: 1800
-      EASYOCR_LANGS: ${EASYOCR_LANGS:-en,uk}
-      OCR_MAX_IMAGE_DIMENSION: 1200
-      OCR_DOWNLOAD_MODELS: "true"
-      EASYOCR_MODEL_DIR: /app/storage/easyocr
-    depends_on:
-      redis:
-        condition: service_healthy
-    volumes:
-      - worker-models:/app/storage/easyocr
-    restart: "no"
-
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
@@ -73,9 +50,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: "no"
+    restart: "unless-stopped"
 
 volumes:
   api-data:
-  worker-models:
   redis-data:
