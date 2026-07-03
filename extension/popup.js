@@ -765,7 +765,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             renderDecisionButtons();
 
-            // Render evidence links
+            // Display evidence links
             if (data.evidence_links && data.evidence_links.length > 0) {
                 const allUrls = data.evidence_links.map(l => l.url).join('\n');
                 renderEvidenceLinks(data, evidenceLinksDiv);
