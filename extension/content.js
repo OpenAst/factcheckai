@@ -108,17 +108,15 @@ function createOverlay() {
     toolbar.appendChild(minimizeBtn);
     toolbar.appendChild(closeBtn);
 
-    const body = document.createElement('div');
-    body.style.flex = '1';
-    body.style.padding = '16px';
-    body.style.background = '#f4f7f6';
-    body.style.display = 'flex';
-    body.style.alignItems = 'center';
-    body.style.justifyContent = 'center';
-    body.style.color = '#666';
-    body.textContent = 'Pinned view active. Use the extension popup to reopen the UI.';
+    const iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('popup.html?embedded=1');
+    iframe.title = 'SRT Fact-Check AI pinned panel';
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.border = '0';
+    iframe.style.background = '#f4f7f6';
 
-    root.appendChild(body);
+    root.appendChild(iframe);
     document.documentElement.appendChild(root);
     document.documentElement.appendChild(toolbar);
 

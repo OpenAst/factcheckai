@@ -11,8 +11,7 @@
   "permissions": [
     "activeTab",
     "tabs",
-    "scripting",
-    "storage"
+    "scripting"
   ],
   "host_permissions": [
     "https://*.facebook.com/*",
@@ -47,5 +46,20 @@
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup.html",
+        "popup.js"
+      ],
+      "matches": [
+        "https://*.facebook.com/*",
+        "https://*.instagram.com/*",
+        "https://*.threads.net/*",
+        "https://*.intern.facebook.com/*",
+        "https://*.our.intern.facebook.com/*"
+      ]
+    }
+  ]
 }

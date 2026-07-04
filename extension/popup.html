@@ -13,6 +13,14 @@
       color: #24313a;
     }
 
+    body.embedded {
+      width: auto;
+      min-width: 0;
+      min-height: 100vh;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+
     .header {
       display: flex;
       align-items: center;
@@ -314,20 +322,7 @@
   </div>
 
   <div style="margin-bottom:10px;">
-    <button id="scan-image-btn" class="retry-btn">Scan Image</button>
-  </div>
-
-  <div style="margin-bottom:10px;">
     <button id="pin-btn" class="retry-btn">Pin To Page</button>
-  </div>
-
-  <div id="backend-config" class="section" style="display: block; margin-bottom: 10px;">
-    <div class="section-title">
-      <span>Backend API URL</span>
-      <span class="hint-text">Set your deployed backend host</span>
-    </div>
-    <input id="backend-url-input" type="text" class="content-box" style="height: auto; min-height: 32px; max-height: 80px; margin-bottom: 8px;" placeholder="https://api.example.com" />
-    <button id="save-backend-url-btn" class="retry-btn" style="width: auto;">Save Backend URL</button>
   </div>
 
   <div style="margin-bottom:10px;">

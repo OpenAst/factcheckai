@@ -156,14 +156,14 @@ def filter_search_results(results: List[Dict], max_results: int = 5) -> List[Dic
 
 # Gemini models
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
     "gemini-2.0-flash",
+    "gemini-2.5-flash",
     "gemini-2.0-flash-001",
 ]
 
 GROQ_MODELS = [
-    "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
 ]
 
 _GUIDANCE_CACHE = None
@@ -278,7 +278,7 @@ class SerperService:
             'Content-Type': 'application/json'
         }
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=12)
+            response = requests.post(url, headers=headers, json=payload, timeout=6)
             response.raise_for_status()
             results = response.json()
             organic = results.get("organic", [])

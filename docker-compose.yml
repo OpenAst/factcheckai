@@ -7,20 +7,12 @@ services:
       PORT: 8000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CACHE_DB_PATH: /app/storage/cache.db
-      REDIS_URL: redis://redis:6379/0
-      REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: 5
-      REDIS_SOCKET_TIMEOUT_SECONDS: 15
-      OCR_QUEUE_NAME: ocr_jobs
-      OCR_JOB_TTL_SECONDS: 1800
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GROQ_API_KEY: ${GROQ_API_KEY}
       SERPER_API_KEY: ${SERPER_API_KEY}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RELIABLE_NEWS_DOMAINS: ${RELIABLE_NEWS_DOMAINS:-}
       GUIDANCE_PDF_PATHS: ${GUIDANCE_PDF_PATHS:-}
-    depends_on:
-      redis:
-        condition: service_healthy
     expose:
       - "8000"
     volumes:
@@ -37,21 +29,5 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test:
-        - CMD
-        - redis-cli
-        - ping
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: "unless-stopped"
-
 volumes:
   api-data:
-  redis-data:

@@ -1,54 +1,15 @@
 const DEFAULT_API_BASE_URL = 'https://factcheckai.oneclyq.com';
 let API_BASE_URL = DEFAULT_API_BASE_URL;
 let BACKEND_URL = `${API_BASE_URL}/factcheck`;
-let OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
-
-function normalizeBaseUrl(value) {
-    if (!value) return DEFAULT_API_BASE_URL;
-    return value.trim().replace(/\/+$/, '');
-}
-
-function updateBackendUrls(baseUrl) {
-    API_BASE_URL = normalizeBaseUrl(baseUrl || DEFAULT_API_BASE_URL);
-    BACKEND_URL = `${API_BASE_URL}/factcheck`;
-    OCR_JOBS_URL = `${API_BASE_URL}/ocr/jobs`;
-}
-
-function isValidBackendUrl(url) {
-    try {
-        const parsed = new URL(url);
-        return parsed.protocol === 'https:' || parsed.protocol === 'http:';
-    } catch (_err) {
-        return false;
-    }
-}
-
-function loadBackendUrl() {
-    return new Promise(resolve => {
-        chrome.storage.local.get({ backendUrl: DEFAULT_API_BASE_URL }, data => {
-            const url = data.backendUrl || DEFAULT_API_BASE_URL;
-            updateBackendUrls(url);
-            resolve(url);
-        });
-    });
-}
-
-function saveBackendUrl(url) {
-    return new Promise(resolve => {
-        chrome.storage.local.set({ backendUrl: normalizeBaseUrl(url) }, () => {
-            updateBackendUrls(url);
-            resolve();
-        });
-    });
-}
 
 document.addEventListener('DOMContentLoaded', async () => {
+    const isEmbedded = new URLSearchParams(window.location.search).get('embedded') === '1';
+    if (isEmbedded) document.body.classList.add('embedded');
     const cacheBadge = document.getElementById('cache-badge');
     const copyBtn = document.getElementById('copy-btn');
 
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
-    const scanImageBtn = document.getElementById('scan-image-btn');
     const pinBtn = document.getElementById('pin-btn');
     const checkBtn = document.getElementById('check-btn');
     const detectedTextDiv = document.getElementById('detected-text');
@@ -57,28 +18,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const signalSection = document.getElementById('signal-section');
     const signalBadges = document.getElementById('signal-badges');
     const decisionSection = document.getElementById('decision-section');
-    const backendUrlInput = document.getElementById('backend-url-input');
-    const saveBackendUrlBtn = document.getElementById('save-backend-url-btn');
-
-    const storedBackendUrl = await loadBackendUrl();
-    backendUrlInput.value = storedBackendUrl;
-
-    saveBackendUrlBtn.addEventListener('click', async () => {
-        const newUrl = backendUrlInput.value.trim();
-        if (!isValidBackendUrl(newUrl)) {
-            setMiniStatus('Invalid backend URL. Use http:// or https://.', true);
-            return;
-        }
-        await saveBackendUrl(newUrl);
-        setMiniStatus(`Backend URL saved: ${API_BASE_URL}`);
-    });
-
-    backendUrlInput.addEventListener('keydown', async event => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            saveBackendUrlBtn.click();
-        }
-    });
 
     const decisionButtons = document.getElementById('decision-buttons');
     const openAllLinksBtn = document.getElementById('open-all-links-btn');
@@ -465,96 +404,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function pollOcrJob(jobId, maxAttempts = 90) {
-        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-            const response = await fetch(`${OCR_JOBS_URL}/${jobId}`);
-            let data = {};
-            try {
-                data = await response.json();
-            } catch (_) {}
-
-            if (!response.ok) {
-                throw new Error(await readErrorDetail(response, 'Could not read OCR job'));
-            }
-
-            if (data.status === 'completed') {
-                return data.result_text || '';
-            }
-            if (data.status === 'failed') {
-                throw new Error(data.error || 'OCR job failed');
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-
-        throw new Error('OCR job timed out after 3 minutes');
-    }
-
-    async function scanImageText() {
-        detectedTextDiv.value = 'Capturing image for OCR...';
-        checkBtn.disabled = true;
-        scanImageBtn.disabled = true;
-        currentSelectedClaim = '';
-        saveReviewStatus.style.display = 'none';
-        let stage = 'starting';
-
-        try {
-            stage = 'capturing visible tab';
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            const dataUrl = await chrome.tabs.captureVisibleTab(tab?.windowId, { format: 'png' });
-            if (!dataUrl) {
-                throw new Error('captureVisibleTab returned no image data');
-            }
-
-            stage = 'submitting OCR job';
-            const submitResponse = await fetch(OCR_JOBS_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    image_data: dataUrl,
-                    source_hint: 'extension-visible-tab'
-                })
-            });
-
-            let submitData = {};
-            try {
-                submitData = await submitResponse.json();
-            } catch (_) {}
-
-            if (!submitResponse.ok) {
-                throw new Error(await readErrorDetail(submitResponse, 'Could not submit OCR job'));
-            }
-
-            detectedTextDiv.value = 'Worker is reading image text...';
-            stage = `polling OCR job ${submitData.job_id}`;
-            const ocrText = await pollOcrJob(submitData.job_id);
-
-            if (ocrText && ocrText.trim()) {
-                extractedText = `All detected text:\n${ocrText.trim()}`;
-                detectedTextDiv.value = extractedText;
-                checkBtn.disabled = false;
-                setMiniStatus('Image text extracted with EasyOCR worker.');
-            } else {
-                detectedTextDiv.value = 'No text found in the image. You can still paste text manually.';
-                checkBtn.disabled = false;
-                setMiniStatus('No text was detected in the captured image.', true);
-            }
-        } catch (err) {
-            console.error('[ocr] image scan failed', { stage, error: err });
-            detectedTextDiv.value = 'Image scan failed. You can still paste text manually.';
-            checkBtn.disabled = false;
-            setMiniStatus(`Image scan failed at ${stage}: ${formatError(err)}`, true);
-        } finally {
-            scanImageBtn.disabled = false;
-        }
-    }
-
     // Initial extraction
     tryExtract();
 
     // Retry button listener
     retryBtn.addEventListener('click', tryExtract);
-    scanImageBtn.addEventListener('click', scanImageText);
+
+    async function sendPinMessage(tabId, action) {
+        try {
+            return await chrome.tabs.sendMessage(tabId, { action });
+        } catch (_) {
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                files: ['content.js']
+            });
+            return chrome.tabs.sendMessage(tabId, { action });
+        }
+    }
 
     // Pin to page button
     if (pinBtn) {
@@ -567,7 +433,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (_) {
                 state = undefined;
             }
-            if (state && state.pinned) {
+            if (isEmbedded || (state && state.pinned)) {
                 pinBtn.textContent = 'Unpin From Page';
             } else {
                 try {
@@ -587,96 +453,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         pinBtn.addEventListener('click', async () => {
             try {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                let resp;
-                try {
-                    resp = await chrome.tabs.sendMessage(tab.id, { action: 'togglePin' });
-                } catch (_) {
-                    resp = undefined;
-                }
-
-                if (resp === undefined) {
-                    // Content script not present; inject/remove overlay directly into the page.
-                    try {
-                        await chrome.scripting.executeScript({
-                            target: { tabId: tab.id },
-                            func: () => {
-                                const existing = document.getElementById('factcheck-overlay-root');
-                                const existingToolbar = document.getElementById('factcheck-overlay-toolbar');
-                                if (existing) {
-                                    existing.remove();
-                                    if (existingToolbar) existingToolbar.remove();
-                                    return { pinned: false };
-                                }
-
-                                const root = document.createElement('div');
-                                root.id = 'factcheck-overlay-root';
-                                root.style.position = 'fixed';
-                                root.style.right = '20px';
-                                root.style.bottom = '20px';
-                                root.style.zIndex = '2147483647';
-                                root.style.border = '1px solid rgba(0,0,0,0.15)';
-                                root.style.borderRadius = '12px';
-                                root.style.boxShadow = '0 10px 30px rgba(0,0,0,0.25)';
-                                root.style.background = '#fff';
-                                root.style.display = 'flex';
-                                root.style.flexDirection = 'column';
-                                root.style.width = '360px';
-                                root.style.height = '500px';
-                                root.style.overflow = 'hidden';
-                                root.style.fontFamily = 'system-ui,Segoe UI,Helvetica,Arial,sans-serif';
-
-                                const body = document.createElement('div');
-                                body.style.flex = '1';
-                                body.style.padding = '16px';
-                                body.style.background = '#f4f7f6';
-                                body.style.display = 'flex';
-                                body.style.alignItems = 'center';
-                                body.style.justifyContent = 'center';
-                                body.style.color = '#666';
-                                body.textContent = 'Pinned view active. Use the extension popup to reopen the UI.';
-                                root.appendChild(body);
-
-                                const toolbar = document.createElement('div');
-                                toolbar.id = 'factcheck-overlay-toolbar';
-                                toolbar.style.position = 'fixed';
-                                toolbar.style.right = '20px';
-                                toolbar.style.bottom = '528px';
-                                toolbar.style.zIndex = '2147483647';
-                                toolbar.style.display = 'flex';
-                                toolbar.style.gap = '6px';
-                                toolbar.style.alignItems = 'center';
-                                toolbar.style.padding = '6px';
-                                toolbar.style.borderRadius = '8px';
-                                toolbar.style.background = '#24313a';
-                                toolbar.style.boxShadow = '0 6px 18px rgba(0,0,0,0.18)';
-
-                                const close = document.createElement('button');
-                                close.textContent = 'Close';
-                                close.style.padding = '6px 10px';
-                                close.style.borderRadius = '6px';
-                                close.style.border = '1px solid rgba(255,255,255,0.18)';
-                                close.style.background = '#fff';
-                                close.style.color = '#24313a';
-                                close.style.cursor = 'pointer';
-                                close.addEventListener('click', () => {
-                                    root.remove();
-                                    toolbar.remove();
-                                });
-                                toolbar.appendChild(close);
-
-                                document.documentElement.appendChild(root);
-                                document.documentElement.appendChild(toolbar);
-                                return { pinned: true };
-                            }
-                        });
-                        pinBtn.textContent = 'Unpin From Page';
-                        return;
-                    } catch (err) {
-                        throw err;
-                    }
-                }
+                const resp = await sendPinMessage(tab.id, isEmbedded ? 'unpin' : 'togglePin');
                 if (resp && resp.pinned) {
                     pinBtn.textContent = 'Unpin From Page';
+                    if (!isEmbedded) window.close();
                 } else {
                     pinBtn.textContent = 'Pin To Page';
                 }

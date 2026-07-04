@@ -6,5 +6,4 @@ requests
 gunicorn
 python-dotenv
 ddgs
-redis
 pypdf

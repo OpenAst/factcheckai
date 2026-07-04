@@ -28,19 +28,3 @@ ENV LOG_LEVEL=INFO \
 EXPOSE 8000
 
 CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker backend.main:app --bind 0.0.0.0:${PORT:-8000} --timeout 90"]
-
-
-FROM base AS worker
-
-COPY requirements-worker.txt ./
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.0 torchvision==0.22.0 \
-    && pip install --no-deps -r requirements-worker.txt
-COPY backend ./backend
-
-ENV LOG_LEVEL=INFO \
-    EASYOCR_LANGS=en,uk \
-    OCR_MAX_IMAGE_DIMENSION=1200 \
-    OCR_DOWNLOAD_MODELS=true \
-    EASYOCR_MODEL_DIR=/app/storage/easyocr
-
-CMD ["python", "-m", "backend.ocr_worker"]

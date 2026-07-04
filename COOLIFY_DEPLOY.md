@@ -5,8 +5,6 @@ This repo can be deployed in Coolify as a Docker Compose application.
 ## Services
 
 - `api`: FastAPI app exposed on port `8000`
-- `worker`: OCR background worker
-- `redis`: queue and OCR job state
 
 ## Required Environment Variables
 
@@ -18,12 +16,10 @@ GROQ_API_KEY=...
 SERPER_API_KEY=...
 ADMIN_TOKEN=...
 LOG_LEVEL=INFO
-EASYOCR_LANGS=en,uk
 ```
 
 `ADMIN_TOKEN` is optional unless you use the admin endpoints.
 `LOG_LEVEL` is optional and defaults to `INFO`. Use `DEBUG`, `WARNING`, or `ERROR` when you want more or less log output.
-`EASYOCR_LANGS` controls OCR languages. The default `en,uk` supports English and Ukrainian; add other EasyOCR language codes only if you need them because each language can increase model size/startup time.
 
 ## Coolify Setup
 
@@ -36,4 +32,4 @@ EASYOCR_LANGS=en,uk
 
 The compose file uses `expose` instead of `ports` for the API. This lets Coolify's proxy route traffic to the container without reserving host port `8000`, which avoids port allocation conflicts on shared servers.
 
-The compose file creates persistent volumes for the SQLite cache, EasyOCR models, and Redis data. The OCR worker downloads EasyOCR models on first start, so the first OCR request can take longer than later requests.
+The compose file creates a persistent volume for the SQLite cache.

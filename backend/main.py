@@ -7,18 +7,17 @@ import re
 import os
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 try:
     from .logging_config import configure_logging
     from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
-    from .ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 except ImportError:
     from logging_config import configure_logging
     from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
-    from ocr_queue import get_ocr_job, is_ocr_queue_available, submit_ocr_job
 
 load_dotenv()
 configure_logging()
@@ -125,17 +124,6 @@ class ReviewSelectionRequest(BaseModel):
     evidence_links: List[EvidenceLink] = []
     notes: str = ""
 
-
-class OcrJobRequest(BaseModel):
-    image_data: str
-    source_hint: str = ""
-
-
-class OcrJobResponse(BaseModel):
-    job_id: str
-    status: str
-    result_text: str = ""
-    error: str = ""
 
 gemini_service = GeminiService()
 
@@ -521,19 +509,15 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     is_spanish_context = language_context["language"] in {"spanish", "spanish_ukraine_context"}
 
     if is_ukraine_context:
-        for domain in UKRAINIAN_FACTCHECK_DOMAINS:
+        for domain in UKRAINIAN_FACTCHECK_DOMAINS[:2]:
             queries.append(f"{extracted_claim} site:{domain}")
         queries.append(f"{extracted_claim} StopFake VoxCheck Детектор медіа")
         queries.append(f"{extracted_claim} фактчек")
-        queries.append(f"{extracted_claim} фейк перевірка фактів")
-        queries.append(f"{extracted_claim} українські новини")
     if is_spanish_context:
-        for domain in SPANISH_FACTCHECK_DOMAINS:
+        for domain in SPANISH_FACTCHECK_DOMAINS[:2]:
             queries.append(f"{extracted_claim} site:{domain}")
         queries.append(f"{extracted_claim} verificación de datos")
         queries.append(f"{extracted_claim} falso engañoso evidencia")
-        queries.append(f"{extracted_claim} fact check español")
-        queries.append(f"{extracted_claim} noticias español")
     queries.append(f"{extracted_claim} fact check")
     queries.append(f"{extracted_claim} false misleading evidence")
 
@@ -551,8 +535,8 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
     if is_ukraine_context or is_spanish_context:
-        return _dedupe(queries)[:10]
-    return _dedupe(queries)[:3]
+        return _dedupe(queries)[:4]
+    return _dedupe(queries)[:2]
 
 
 def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8) -> List[Dict]:
@@ -693,42 +677,41 @@ def _search_claim_results(claim_text: str, original_text: str, category: Optiona
     search_queries = _build_search_queries(original_text, claim_text)
     language_context = _detect_language_context(original_text, claim_text)
     is_regional_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish", "spanish_ukraine_context"}
-    try:
-        collected_results = []
-        for query in search_queries:
-            ddg_results = DuckDuckGoService.search(
-                query,
-                max_results=5,
-                region=language_context.get("ddg_region", ""),
-            )
-            serper_results = SerperService.search(
+    collected_results = []
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(search_queries)))) as executor:
+        futures = [
+            executor.submit(
+                SerperService.search,
                 query,
                 gl=language_context.get("search_gl", ""),
                 hl=language_context.get("search_hl", ""),
             )
-            if ddg_results:
-                collected_results.append(ddg_results)
+            for query in search_queries
+        ]
+        for future in as_completed(futures):
+            serper_results = future.result()
             if serper_results:
                 collected_results.append(serper_results)
-        search_results = _merge_search_results(collected_results, max_results=18 if is_regional_context else 10)
-    except Exception as e:
-        logger.warning("primary search failed, falling back to DuckDuckGo then Serper: %s", e)
-        fallback_results = []
-        for query in search_queries:
-            ddg_results = DuckDuckGoService.search(
-                query,
-                max_results=5,
-                region=language_context.get("ddg_region", ""),
-            )
-            if ddg_results:
-                fallback_results.append(ddg_results)
-                continue
-            fallback_results.append(SerperService.search(
-                query,
-                gl=language_context.get("search_gl", ""),
-                hl=language_context.get("search_hl", ""),
-            ))
-        search_results = _merge_search_results(fallback_results, max_results=18 if is_regional_context else 10)
+
+    if not collected_results:
+        logger.info("Serper returned no results; falling back to DuckDuckGo")
+        fallback_queries = search_queries[:2]
+        with ThreadPoolExecutor(max_workers=min(2, max(1, len(fallback_queries)))) as executor:
+            futures = [
+                executor.submit(
+                    DuckDuckGoService.search,
+                    query,
+                    max_results=5,
+                    region=language_context.get("ddg_region", ""),
+                )
+                for query in fallback_queries
+            ]
+            for future in as_completed(futures):
+                ddg_results = future.result()
+                if ddg_results:
+                    collected_results.append(ddg_results)
+
+    search_results = _merge_search_results(collected_results, max_results=10 if is_regional_context else 8)
 
     if suspected_author and _should_prioritize_authorship(original_text, claim_text, suspected_author):
         logger.info("authorship-sensitive search triggered claim=%r", claim_text)
@@ -772,46 +755,6 @@ def admin_list_evidence(x_admin_token: Optional[str] = Header(None)):
     _require_admin(x_admin_token)
     entries = CuratedEvidenceService.list_entries()
     return {"evidence": entries}
-
-
-@app.post("/ocr/jobs", response_model=OcrJobResponse)
-def create_ocr_job(payload: OcrJobRequest):
-    logger.info(
-        "ocr job create requested source_hint=%r image_chars=%s",
-        payload.source_hint,
-        len(payload.image_data or ""),
-    )
-    if not payload.image_data.strip():
-        raise HTTPException(status_code=400, detail="image_data is required")
-    if not is_ocr_queue_available():
-        raise HTTPException(status_code=503, detail="OCR queue is not configured")
-
-    job_id = submit_ocr_job(
-        payload.image_data.strip(),
-        metadata={"source_hint": payload.source_hint.strip()},
-    )
-    logger.info("ocr job queued job_id=%s", job_id)
-    return OcrJobResponse(job_id=job_id, status="queued")
-
-
-@app.get("/ocr/jobs/{job_id}", response_model=OcrJobResponse)
-def read_ocr_job(job_id: str):
-    logger.info("ocr job read requested job_id=%s", job_id)
-    if not is_ocr_queue_available():
-        raise HTTPException(status_code=503, detail="OCR queue is not configured")
-
-    job = get_ocr_job(job_id)
-    if not job:
-        logger.warning("ocr job not found job_id=%s", job_id)
-        raise HTTPException(status_code=404, detail="OCR job not found")
-
-    logger.info("ocr job status job_id=%s status=%s", job_id, job["status"])
-    return OcrJobResponse(
-        job_id=job["job_id"],
-        status=job["status"],
-        result_text=job.get("result_text", ""),
-        error=job.get("error", ""),
-    )
 
 
 @app.get('/admin/reviews')
@@ -1311,10 +1254,12 @@ async def perform_fact_check(request: FactCheckRequest):
             fallback_claim = scam_override.get("claim", "").strip()
             claim_reason = scam_override.get("reason", "")
         else:
-            fallback_claim = gemini_service.extract_claim(claim_source_text)
+            fallback_claim = ""
 
         logger.info("factcheck extracting candidate claims")
-        extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=3)
+        extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=2)
+        if not extracted_claims and not fallback_claim:
+            fallback_claim = claim_source_text[:280]
         if fallback_claim and fallback_claim not in extracted_claims:
             extracted_claims.insert(0, fallback_claim)
         attribution_claim = _extract_attribution_claim(request.text, _extract_suspected_author(request.text))
@@ -1336,40 +1281,28 @@ async def perform_fact_check(request: FactCheckRequest):
         logger.info("factcheck gathering search results")
         claim_options = []
         claim_results_map = {}
-        preview_claims = extracted_claims[:2]
-        for claim in preview_claims:
-            claim_results = _search_claim_results(claim, request.text, request.category, suspected_author=suspected_author)
-            claim_results_map[claim] = claim_results
-            option_links = [
-                EvidenceLink(
-                    title=r.get("title", "Source"),
-                    url=r.get("link", ""),
-                    snippet=r.get("snippet", "")
-                )
-                for r in claim_results[:3]
-                if r.get("link") and not _is_social_link(r.get("link")) and not _is_pdf_link(r.get("link"))
-            ]
-            claim_options.append(ClaimOption(claim=claim, evidence_links=option_links))
-
-        if extracted_claim not in claim_results_map:
-            claim_results_map[extracted_claim] = _search_claim_results(
-                extracted_claim,
-                request.text,
-                request.category,
-                suspected_author=suspected_author,
-            )
+        claim_results_map[extracted_claim] = _search_claim_results(
+            extracted_claim,
+            request.text,
+            request.category,
+            suspected_author=suspected_author,
+        )
+        for claim in extracted_claims:
+            links = []
+            if claim == extracted_claim:
+                links = [
+                    EvidenceLink(
+                        title=r.get("title", "Source"),
+                        url=r.get("link", ""),
+                        snippet=r.get("snippet", ""),
+                    )
+                    for r in claim_results_map[extracted_claim][:3]
+                    if r.get("link") and not _is_social_link(r.get("link")) and not _is_pdf_link(r.get("link"))
+                ]
             claim_options.append(
                 ClaimOption(
-                    claim=extracted_claim,
-                    evidence_links=[
-                        EvidenceLink(
-                            title=r.get("title", "Source"),
-                            url=r.get("link", ""),
-                            snippet=r.get("snippet", ""),
-                        )
-                        for r in claim_results_map[extracted_claim][:3]
-                        if r.get("link") and not _is_social_link(r.get("link")) and not _is_pdf_link(r.get("link"))
-                    ],
+                    claim=claim,
+                    evidence_links=links,
                 )
             )
 
