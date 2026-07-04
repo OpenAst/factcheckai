@@ -457,43 +457,75 @@ def _detect_scam_like_claim(text: str) -> Optional[Dict[str, str]]:
     }
 
 
-def _extract_media_focus_text(text: str) -> str:
+def _extract_labeled_section(text: str, marker: str, stop_markers: Optional[List[str]] = None, max_chars: int = 1200) -> str:
     if not text:
         return ""
 
+    stop_markers = stop_markers or []
     normalized_text = text.replace("\r", "")
-    markers = ["All detected text:", "Text in Media:"]
-    for marker in markers:
-        if marker.lower() not in normalized_text.lower():
+    if marker.lower() not in normalized_text.lower():
+        return ""
+
+    lines = normalized_text.splitlines()
+    capture = False
+    captured = []
+    marker_lower = marker.lower()
+    stop_pattern = "|".join(re.escape(item.lower().rstrip(":")) for item in stop_markers)
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if capture and captured:
+                break
             continue
 
-        lines = normalized_text.splitlines()
-        capture = False
-        captured = []
-        for raw_line in lines:
-            line = raw_line.strip()
-            if not line:
-                if capture and captured:
-                    break
-                continue
+        if line.lower().startswith(marker_lower):
+            capture = True
+            remainder = line[len(marker):].strip()
+            if remainder:
+                captured.append(remainder)
+            continue
 
-            if line.lower().startswith(marker.lower()):
-                capture = True
-                remainder = line[len(marker):].strip()
-                if remainder:
-                    captured.append(remainder)
-                continue
+        if capture:
+            lowered = line.lower().rstrip(":")
+            if stop_pattern and re.match(rf"^({stop_pattern})\b", lowered, flags=re.IGNORECASE):
+                break
+            captured.append(line)
+            if len(" ".join(captured)) > max_chars:
+                break
 
-            if capture:
-                if re.match(r"^(content in review|transcript|creation time|link information|retry detection|fact check claim)\b", line, flags=re.IGNORECASE):
-                    break
-                captured.append(line)
-                if len(" ".join(captured)) > 350:
-                    break
+    return _normalize_space(" ".join(captured))
 
-        focused = _normalize_space(" ".join(captured))
-        if focused:
-            return focused
+
+def _extract_factcheck_source_text(text: str) -> str:
+    if not text:
+        return ""
+
+    content = _extract_labeled_section(
+        text,
+        "Content In Review:",
+        stop_markers=["Transcript:", "Text in Media:", "All detected text:", "Creation time:", "Link information:"],
+        max_chars=1600,
+    )
+    transcript = _extract_labeled_section(
+        text,
+        "Transcript:",
+        stop_markers=["Text in Media:", "All detected text:", "Creation time:", "Link information:"],
+        max_chars=900,
+    )
+    media = (
+        _extract_labeled_section(text, "Text in Media:", stop_markers=["All detected text:", "Creation time:", "Link information:"], max_chars=500)
+        or _extract_labeled_section(text, "All detected text:", stop_markers=["Creation time:", "Link information:"], max_chars=500)
+    )
+
+    sections = []
+    if content:
+        sections.append(content)
+    if transcript and transcript not in sections:
+        sections.append(transcript)
+    if media and media not in sections:
+        sections.append(media)
+    if sections:
+        return _normalize_space("\n\n".join(sections))
 
     return ""
 
@@ -1412,7 +1444,7 @@ async def perform_fact_check(request: FactCheckRequest):
             )
 
         logger.info("factcheck preparing claim extraction")
-        claim_source_text = _extract_media_focus_text(request.text) or _extract_srt_post_claim_text(request.text) or request.text
+        claim_source_text = _extract_factcheck_source_text(request.text) or _extract_srt_post_claim_text(request.text) or request.text
         if claim_source_text != request.text:
             logger.info("factcheck media-focused extraction selected text_preview=%r", claim_source_text[:120])
         initial_language_context = _detect_language_context(request.text, claim_source_text)

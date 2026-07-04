@@ -394,16 +394,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                         return null;
                     }
 
-                    const mediaText = findLabeledBlock(['all detected text', 'text in media']) || extractInlineLabeledText(['all detected text', 'text in media']);
-                    if (mediaText && mediaText.length > 15) return mediaText;
-
-                    // 1. Priority: "Content In Review"
                     const inReview = findByText("Content In Review");
-                    if (inReview && inReview.length > 0) return inReview;
-
-                    // 2. Priority: "Transcript"
                     const transcript = findByText("Transcript");
-                    if (transcript && transcript.length > 5) return transcript;
+                    const mediaText = findLabeledBlock(['all detected text', 'text in media']) || extractInlineLabeledText(['all detected text', 'text in media']);
+
+                    const sections = [];
+                    if (inReview && inReview.length > 0) sections.push(`Content In Review:\n${inReview}`);
+                    if (transcript && transcript.length > 5 && transcript !== inReview) sections.push(`Transcript:\n${transcript}`);
+                    if (mediaText && mediaText.length > 15 && mediaText !== inReview && mediaText !== transcript) {
+                        sections.push(`Text in Media:\n${mediaText}`);
+                    }
+                    if (sections.length > 0) return sections.join('\n\n');
 
                     // 3. Fallback: Any large text blocks
                     const largeBlocks = allElements

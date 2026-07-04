@@ -173,23 +173,42 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 function extractSrtContent() {
     const allElements = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, h5, h6'));
+    const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
 
     function findByText(text) {
         const entry = allElements.find(el => {
-            const inner = el.innerText.trim().toLowerCase();
+            const inner = normalize(el.innerText).toLowerCase();
             return inner === text.toLowerCase();
         });
         if (entry && entry.nextElementSibling) {
-            return entry.nextElementSibling.innerText.trim();
+            return normalize(entry.nextElementSibling.innerText);
+        }
+        return null;
+    }
+
+    function findLabeledBlock(labels) {
+        for (const el of allElements) {
+            const text = normalize(el.innerText);
+            const lowered = text.toLowerCase();
+            if (!labels.some(label => lowered === label || lowered.startsWith(label + ':'))) {
+                continue;
+            }
+            const next = el.nextElementSibling ? normalize(el.nextElementSibling.innerText) : '';
+            if (next && next.length > 15) return next;
         }
         return null;
     }
 
     const inReview = findByText('Content In Review');
-    if (inReview && inReview.length > 0) return inReview;
-
     const transcript = findByText('Transcript');
-    if (transcript && transcript.length > 5) return transcript;
+    const mediaText = findLabeledBlock(['all detected text', 'text in media']);
+    const sections = [];
+    if (inReview && inReview.length > 0) sections.push(`Content In Review:\n${inReview}`);
+    if (transcript && transcript.length > 5 && transcript !== inReview) sections.push(`Transcript:\n${transcript}`);
+    if (mediaText && mediaText.length > 15 && mediaText !== inReview && mediaText !== transcript) {
+        sections.push(`Text in Media:\n${mediaText}`);
+    }
+    if (sections.length > 0) return sections.join('\n\n');
 
     const largeBlocks = allElements
         .filter(el => {
