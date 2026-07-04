@@ -78,6 +78,7 @@ class FactCheckRequest(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     selected_claim: Optional[str] = None
+    evidence_strategy: Optional[str] = None
 
 class EvidenceLink(BaseModel):
     title: str
@@ -97,6 +98,7 @@ class FactCheckResponse(BaseModel):
     is_cached: bool = False
     claim_status: str = "factual_claim"
     claim_reason: str = ""
+    evidence_strategy: str = "neutral"
     detected_language: str = "unknown"
     language_label: str = "Unknown"
     language_confidence: str = "low"
@@ -127,7 +129,7 @@ class ReviewSelectionRequest(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-06-13-ukraine-spanish-language-routing"
+CACHE_VERSION = "2026-07-04-neutral-refutation-strategy"
 
 UKRAINIAN_NEWS_DOMAINS = [
     "kyivindependent.com",
@@ -500,30 +502,47 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             ordered.append(normalized)
         return ordered
 
+    def _source_language_fragment(text: str) -> str:
+        candidates = []
+        for line in (text or "").splitlines():
+            normalized = _normalize_space(line)
+            if len(normalized) < 12:
+                continue
+            if re.search(r"^(content in review|hide translation|hide all|all detected text|transcript)\b", normalized, flags=re.IGNORECASE):
+                continue
+            if _has_cyrillic(normalized):
+                candidates.append(normalized)
+        if not candidates:
+            return ""
+        return max(candidates, key=len)[:180]
+
     queries: List[str] = []
     suspected_author = _extract_suspected_author(original_text)
     quote_fragment = _extract_quote_fragment(original_text, suspected_author)
+    source_fragment = _source_language_fragment(original_text)
 
     language_context = _detect_language_context(original_text, extracted_claim)
     is_ukraine_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish_ukraine_context"}
     is_spanish_context = language_context["language"] in {"spanish", "spanish_ukraine_context"}
 
     if is_ukraine_context:
+        if source_fragment:
+            queries.append(source_fragment)
         for domain in UKRAINIAN_FACTCHECK_DOMAINS[:2]:
             queries.append(f"{extracted_claim} site:{domain}")
-        queries.append(f"{extracted_claim} StopFake VoxCheck Детектор медіа")
-        queries.append(f"{extracted_claim} фактчек")
+        queries.append(f"{extracted_claim} українські новини")
+        queries.append(f"{extracted_claim} Reuters AP")
     if is_spanish_context:
         for domain in SPANISH_FACTCHECK_DOMAINS[:2]:
             queries.append(f"{extracted_claim} site:{domain}")
         queries.append(f"{extracted_claim} verificación de datos")
-        queries.append(f"{extracted_claim} falso engañoso evidencia")
-    queries.append(f"{extracted_claim} fact check")
-    queries.append(f"{extracted_claim} false misleading evidence")
+        queries.append(f"{extracted_claim} noticias evidencia")
+    queries.append(f"{extracted_claim} evidence")
+    queries.append(f"{extracted_claim} latest reporting")
 
     scam_like = _detect_scam_like_claim(f"{original_text}\n{extracted_claim}")
     if scam_like:
-        queries.append(f"{extracted_claim} scam false warning")
+        queries.append(f"{extracted_claim} official warning")
 
     attribution_claim = _extract_attribution_claim(original_text, suspected_author)
     if _looks_like_attributed_post(original_text) and suspected_author:
@@ -537,6 +556,37 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     if is_ukraine_context or is_spanish_context:
         return _dedupe(queries)[:4]
     return _dedupe(queries)[:2]
+
+
+def _normalize_evidence_strategy(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    if normalized in {"refute", "refutation", "refutation-focused", "debunk", "debunking"}:
+        return "refutation"
+    return "neutral"
+
+
+def _infer_evidence_strategy(requested_strategy: Optional[str], claim_source_text: str, extracted_claim: str) -> str:
+    strategy = _normalize_evidence_strategy(requested_strategy)
+    if strategy == "refutation":
+        return strategy
+    if _detect_scam_like_claim(f"{claim_source_text}\n{extracted_claim}"):
+        return "refutation"
+    lowered = f" {claim_source_text} {extracted_claim} ".lower()
+    refutation_markers = [
+        "scam",
+        "hoax",
+        "fake",
+        "debunk",
+        "false claim",
+        "manipulated",
+        "misleading",
+        "disinformation",
+        "дезінформац",
+        "фейк",
+        "шахрай",
+        "маніпуляц",
+    ]
+    return "refutation" if any(marker in lowered for marker in refutation_markers) else "neutral"
 
 
 def _merge_search_results(query_results: List[List[Dict]], max_results: int = 8) -> List[Dict]:
@@ -1235,6 +1285,7 @@ async def perform_fact_check(request: FactCheckRequest):
                 is_cached=True,
                 claim_status=metadata.get("claim_status", "factual_claim"),
                 claim_reason=metadata.get("claim_reason", ""),
+                evidence_strategy=metadata.get("evidence_strategy", "neutral"),
                 detected_language=metadata.get("detected_language", "unknown"),
                 language_label=metadata.get("language_label", "Unknown"),
                 language_confidence=metadata.get("language_confidence", "low"),
@@ -1277,6 +1328,8 @@ async def perform_fact_check(request: FactCheckRequest):
 
         suspected_author = _extract_suspected_author(request.text)
         prioritize_authorship = _should_prioritize_authorship(request.text, extracted_claim, suspected_author)
+        evidence_strategy = _infer_evidence_strategy(request.evidence_strategy, claim_source_text, extracted_claim)
+        logger.info("factcheck evidence_strategy=%s", evidence_strategy)
 
         logger.info("factcheck gathering search results")
         claim_options = []
@@ -1325,6 +1378,7 @@ async def perform_fact_check(request: FactCheckRequest):
             original_text=request.text,
             suspected_author=suspected_author,
             prioritize_authorship=prioritize_authorship,
+            evidence_strategy=evidence_strategy,
             language_context=language_context,
         )
 
@@ -1367,6 +1421,7 @@ async def perform_fact_check(request: FactCheckRequest):
                     ],
                     "claim_status": claim_status,
                     "claim_reason": claim_reason,
+                    "evidence_strategy": evidence_strategy,
                     "detected_language": language_context.get("language", initial_language_context.get("language", "unknown")),
                     "language_label": language_context.get("label", initial_language_context.get("label", "Unknown")),
                     "language_confidence": language_context.get("confidence", initial_language_context.get("confidence", "low")),
@@ -1383,6 +1438,7 @@ async def perform_fact_check(request: FactCheckRequest):
             is_cached=False,
             claim_status=claim_status,
             claim_reason=claim_reason,
+            evidence_strategy=evidence_strategy,
             detected_language=language_context.get("language", "unknown"),
             language_label=language_context.get("label", "Unknown"),
             language_confidence=language_context.get("confidence", "low"),

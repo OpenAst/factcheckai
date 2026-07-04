@@ -527,6 +527,7 @@ TEXT:
         original_text: str = "",
         suspected_author: str = "",
         prioritize_authorship: bool = False,
+        evidence_strategy: str = "neutral",
         language_context: Dict[str, str] = None,
     ) -> str:
         """Analyze the claim against search results and produce a verdict."""
@@ -569,10 +570,21 @@ TEXT:
             context += f"Snippet: {res.get('snippet')}\n"
             context += f"Link: {res.get('link')}\n\n"
 
-        task_steps = """1. Determine the truthfulness of the main factual claim.
+        strategy_instruction = (
+            "Evidence strategy: NEUTRAL. Weigh confirming, contradicting, and contextual evidence neutrally before choosing a verdict."
+        )
+        key_points_instruction = "Bullet points with the strongest evidence for, against, and contextualizing the claim"
+        if evidence_strategy == "refutation":
+            strategy_instruction = (
+                "Evidence strategy: REFUTATION-FOCUSED. First look for the strongest direct evidence that contradicts or debunks the claim, "
+                "while still checking whether reliable evidence confirms it."
+            )
+            key_points_instruction = "Bullet points prioritizing direct contradicting/debunking evidence, then any confirming or contextual evidence"
+
+        task_steps = f"""1. Identify exactly what factual claim is being made, without assuming it is true or false.
 2. If this appears to be an attributed post, separately assess whether reliable reporting confirms the named author actually made the post or statement.
 3. Do not let attribution distract from the main factual claim unless attribution itself is the main thing being checked.
-4. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
+4. {strategy_instruction}
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
@@ -581,10 +593,10 @@ TEXT:
 10. Provide a structured report in Markdown."""
 
         if prioritize_authorship:
-            task_steps = """1. Determine the truthfulness of the main factual claim.
+            task_steps = f"""1. Identify exactly what factual claim is being made, without assuming it is true or false.
 2. Because this appears to be an attributed social post, also check whether reliable reporting confirms the named author actually made the post or statement.
 3. If attribution is unsupported, clearly say that, but still evaluate the substance of the factual claim when the sources allow it.
-4. If the post contains strong false claims, prioritize the most direct evidence that refutes those claims.
+4. {strategy_instruction}
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
@@ -619,7 +631,7 @@ STRUCTURE:
 - **Verdict**: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
 - **Summary**: (2-3 sentences explaining the core finding, starting with the main factual finding)
 - **Attribution Check**: (Only mention this if attribution is actually relevant to the case)
-- **Key Points**: (Bullet points with supporting facts, prioritizing direct refuting evidence when the claims are false)
+- **Key Points**: ({key_points_instruction})
 - **Date Check**: (Explicitly state if the event is current or from the past)
 
 If search results are empty or irrelevant, state "Unverified" and explain why."""

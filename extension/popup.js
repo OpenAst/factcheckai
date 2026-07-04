@@ -92,6 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (hasOfficial) signals.push({ label: 'Official source found', className: 'badge-good' });
         if (hasFactCheck) signals.push({ label: 'Fact-check source found', className: 'badge-good' });
         if (!hasOfficial && !hasFactCheck && links.length) signals.push({ label: 'Review source quality', className: 'badge-warn' });
+        if (data.evidence_strategy === 'refutation') signals.push({ label: 'Refutation-focused search', className: 'badge-warn' });
         if (data.is_cached) signals.push({ label: 'Cached result', className: 'badge-warn' });
         if (data.claim_status && data.claim_status !== 'factual_claim') signals.push({ label: data.claim_status.replace(/_/g, ' '), className: 'badge-risk' });
         return signals;
