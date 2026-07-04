@@ -129,15 +129,26 @@ class ReviewSelectionRequest(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-07-04-grounded-claim-extraction"
+CACHE_VERSION = "2026-07-04-ukrainian-current-news-search"
 
 UKRAINIAN_NEWS_DOMAINS = [
     "kyivindependent.com",
     "pravda.com.ua",
+    "eurointegration.com.ua",
     "ukrinform.net",
     "suspilne.media",
     "hromadske.ua",
     "detector.media",
+    "forbes.ua",
+    "tsn.ua",
+    "unian.ua",
+    "rbc.ua",
+    "obozrevatel.com",
+    "nv.ua",
+    "liga.net",
+    "censor.net",
+    "armyinform.com.ua",
+    "mil.in.ua",
 ]
 
 UKRAINIAN_FACTCHECK_DOMAINS = [
@@ -600,10 +611,28 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             return ""
         return max(candidates, key=len)[:180]
 
+    def _source_keyword_query(text: str) -> str:
+        stopwords = {
+            "hide", "translation", "ukrainian", "українців", "україна", "україни",
+            "також", "зокрема", "який", "яка", "які", "вони", "адже", "через",
+            "with", "that", "have", "this", "from", "about", "their", "there",
+        }
+        terms = []
+        for term in re.findall(r"[A-Za-zА-Яа-яІіЇїЄєҐґ0-9]{4,}", text or ""):
+            lowered = term.lower()
+            if lowered in stopwords:
+                continue
+            if lowered not in terms:
+                terms.append(lowered)
+            if len(terms) >= 10:
+                break
+        return " ".join(terms)
+
     queries: List[str] = []
     suspected_author = _extract_suspected_author(original_text)
     quote_fragment = _extract_quote_fragment(original_text, suspected_author)
     source_fragment = _source_language_fragment(original_text)
+    source_keyword_query = _source_keyword_query(source_fragment)
 
     language_context = _detect_language_context(original_text, extracted_claim)
     is_ukraine_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish_ukraine_context"}
@@ -612,7 +641,14 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     if is_ukraine_context:
         if source_fragment:
             queries.append(source_fragment)
-        for domain in UKRAINIAN_FACTCHECK_DOMAINS[:2]:
+            first_words = " ".join(source_fragment.split()[:10])
+            if first_words:
+                queries.append(f'"{first_words}"')
+        if source_keyword_query:
+            queries.append(f"{source_keyword_query} українські новини")
+            for domain in ["forbes.ua", "tsn.ua", "unian.ua", "rbc.ua"]:
+                queries.append(f"{source_keyword_query} site:{domain}")
+        for domain in UKRAINIAN_FACTCHECK_DOMAINS[:1]:
             queries.append(f"{extracted_claim} site:{domain}")
         queries.append(f"{extracted_claim} українські новини")
         queries.append(f"{extracted_claim} Reuters AP")
@@ -638,7 +674,7 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
         queries.append(f'"{suspected_author}" statement Reuters AP BBC')
         queries.append(f'"{suspected_author}" post verified news')
     if is_ukraine_context or is_spanish_context:
-        return _dedupe(queries)[:4]
+        return _dedupe(queries)[:7]
     return _dedupe(queries)[:2]
 
 

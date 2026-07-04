@@ -2,11 +2,22 @@ import os
 import re
 import requests
 import logging
-from google import genai
-from groq import Groq
-from typing import List, Dict
-from dotenv import load_dotenv
+from importlib import import_module
+from typing import Any, List, Dict
 from urllib.parse import urlparse
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+try:
+    genai = import_module("google.genai")
+except Exception:
+    genai = None
+try:
+    Groq = import_module("groq").Groq
+except Exception:
+    Groq = None
 try:
     from pypdf import PdfReader
 except Exception:
@@ -324,8 +335,8 @@ class DuckDuckGoService:
 
 class GeminiService:
     def __init__(self):
-        self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-        self.gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+        self.groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and Groq else None
+        self.gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY and genai else None
 
     def _call_groq(self, prompt: str) -> str:
         """Try Groq models first."""
@@ -584,7 +595,7 @@ TEXT:
 4. {strategy_instruction}
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
-7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
+7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary. If reliable current-news sources directly report the same factual claim, treat that as supporting evidence rather than calling it Unverified only because no dedicated fact-check exists.
 8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
 10. Provide a structured report in Markdown."""
@@ -596,7 +607,7 @@ TEXT:
 4. {strategy_instruction}
 5. CRITICAL: Identify the DATE and CURRENCY of the news. Is this a current event or old news being reshared?
 6. Evaluate if the claim uses a "True" event in a "Misleading" or "Out of Context" way.
-7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary.
+7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary. If reliable current-news sources directly report the same factual claim, treat that as supporting evidence rather than calling it Unverified only because no dedicated fact-check exists.
 8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
 10. Provide a structured report in Markdown."""
