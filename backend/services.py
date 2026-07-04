@@ -398,12 +398,10 @@ If a guidance snippet conflicts with your default tendency, follow the guidance 
 
     def extract_claim(self, text: str) -> str:
         """Use AI to isolate the single main factual claim from the text."""
-        guidance_block = self._guidance_block(text)
         prompt = f"""You are a senior fact-checking assistant. From the text below, identify and extract the single most important VERIFIABLE FACTUAL CLAIM.
 
-{guidance_block}
-
 Rules:
+- Use ONLY information that appears in TEXT. Do not introduce topics, people, diseases, countries, examples, or wording that are not present in TEXT.
 - Prefer the most consequential and specific factual assertion, not a vague topic summary.
 - If the input includes quoted article text plus separate media-overlay text or "All detected text", prioritize the overlaid/media claim first.
 - Do NOT just restate who posted the content unless authorship itself is the main checkable claim.
@@ -426,13 +424,12 @@ MAIN CLAIM:"""
 
     def extract_claims(self, text: str, max_claims: int = 3) -> List[str]:
         """Extract up to three fact-checkable claims, ordered by importance."""
-        guidance_block = self._guidance_block(text)
         prompt = f"""You are a senior fact-checking assistant.
 From the text below, extract up to {max_claims} distinct VERIFIABLE FACTUAL CLAIMS.
 
-{guidance_block}
-
 Rules:
+- Use ONLY facts stated or directly implied by TEXT. Do not introduce outside examples, outside claims, unrelated topics, or claims from guidance/training data.
+- Every output claim must be traceable to specific words in TEXT.
 - Return 2 claims when there are clearly 2 meaningful factual claims.
 - Return 3 claims only when there are 3 genuinely distinct and important checkable claims.
 - Prefer consequential, specific claims over vague summaries.

@@ -115,6 +115,37 @@ document.addEventListener('DOMContentLoaded', async () => {
         return currentSelectedEvidence || links.find(link => !rejectedEvidenceUrls.has(link.url)) || links[0] || null;
     }
 
+    function resetForNewPost() {
+        const extractedClaimBox = document.getElementById('extracted-claim-box');
+        const extractedClaimText = document.getElementById('extracted-claim-text');
+        const evidenceSection = document.getElementById('evidence-section');
+        const evidenceLinksDiv = document.getElementById('evidence-links');
+
+        currentFactCheckData = null;
+        currentSelectedClaim = "";
+        currentSelectedEvidence = null;
+        currentFinalDecision = "";
+        rejectedEvidenceUrls = new Set();
+
+        cacheBadge.style.display = 'none';
+        resultDiv.style.display = 'none';
+        resultDiv.innerHTML = '';
+        copyBtn.style.display = 'none';
+        loading.style.display = 'none';
+        signalSection.style.display = 'none';
+        decisionSection.style.display = 'none';
+        saveReviewStatus.style.display = 'none';
+        checkBtn.style.display = 'block';
+        checkBtn.disabled = true;
+
+        if (extractedClaimBox) extractedClaimBox.style.display = 'none';
+        if (evidenceSection) evidenceSection.style.display = 'none';
+        if (extractedClaimText) extractedClaimText.innerHTML = '';
+        if (evidenceLinksDiv) evidenceLinksDiv.innerHTML = '';
+        signalBadges.innerHTML = '';
+        decisionButtons.innerHTML = '';
+    }
+
     async function readErrorDetail(response, fallbackMessage = 'Unknown backend error') {
         const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
         const contentType = response.headers.get('content-type') || '';
@@ -307,9 +338,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function tryExtract() {
+        resetForNewPost();
         detectedTextDiv.value = "Detecting content...";
-        checkBtn.disabled = true;
-        currentSelectedClaim = "";
 
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

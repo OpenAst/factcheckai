@@ -129,7 +129,7 @@ class ReviewSelectionRequest(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-07-04-neutral-refutation-strategy"
+CACHE_VERSION = "2026-07-04-grounded-claim-extraction"
 
 UKRAINIAN_NEWS_DOMAINS = [
     "kyivindependent.com",
@@ -485,6 +485,90 @@ def _extract_media_focus_text(text: str) -> str:
             return focused
 
     return ""
+
+
+def _extract_srt_post_claim_text(text: str) -> str:
+    lines = [_normalize_space(line) for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+
+    content_lines = []
+    skip_patterns = [
+        r"^content in review$",
+        r"^creation time$",
+        r"^link information$",
+        r"^retry detection$",
+        r"^fact check claim$",
+        r"^pin to page$",
+        r"^unpin from page$",
+        r"^possible claims$",
+        r"^trust signals$",
+        r"^hide all$",
+    ]
+    for line in lines:
+        lowered = line.lower()
+        if any(re.search(pattern, lowered) for pattern in skip_patterns):
+            continue
+        if lowered.startswith("hide translation"):
+            continue
+        if " • hide all" in lowered:
+            before_marker = re.split(r"hide translation\s*\([^)]*\)\s*•\s*hide all", line, flags=re.IGNORECASE)[0]
+            after_marker = re.split(r"hide translation\s*\([^)]*\)\s*•\s*hide all", line, flags=re.IGNORECASE)[-1]
+            for part in (before_marker, after_marker):
+                part = _normalize_space(part)
+                if len(part) >= 12:
+                    content_lines.append(part)
+            continue
+        if len(line) >= 12:
+            content_lines.append(line)
+
+    if not content_lines:
+        return ""
+
+    focused = []
+    for line in content_lines[:4]:
+        if line not in focused:
+            focused.append(line)
+        if len(" ".join(focused)) > 320:
+            break
+    return _normalize_space(" ".join(focused))
+
+
+def _claim_terms(value: str) -> set:
+    return {
+        term.lower()
+        for term in re.findall(r"[A-Za-zА-Яа-яІіЇїЄєҐґ0-9]{4,}", value or "")
+        if term.lower() not in {"hide", "translation", "ukrainian", "content", "review", "claim"}
+    }
+
+
+def _is_claim_grounded_in_text(claim: str, source_text: str) -> bool:
+    claim_terms = _claim_terms(claim)
+    if not claim_terms:
+        return False
+    source_terms = _claim_terms(source_text)
+    if not source_terms:
+        return True
+    overlap = claim_terms & source_terms
+    if len(claim_terms) <= 3:
+        return len(overlap) >= max(1, len(claim_terms) - 1)
+    return len(overlap) >= 2 and (len(overlap) / len(claim_terms)) >= 0.35
+
+
+def _fallback_claim_from_post_text(source_text: str) -> str:
+    normalized = _normalize_space(source_text)
+    if not normalized:
+        return ""
+    segments = [
+        _normalize_space(segment)
+        for segment in re.split(r"(?<=[.!?。！？])\s+|[•|]", normalized)
+        if _normalize_space(segment)
+    ]
+    for segment in segments:
+        if len(segment) >= 12 and not segment.lower().startswith("hide translation"):
+            return segment[:240]
+    return normalized[:240]
 
 
 def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]:
@@ -1292,7 +1376,7 @@ async def perform_fact_check(request: FactCheckRequest):
             )
 
         logger.info("factcheck preparing claim extraction")
-        claim_source_text = _extract_media_focus_text(request.text) or request.text
+        claim_source_text = _extract_media_focus_text(request.text) or _extract_srt_post_claim_text(request.text) or request.text
         if claim_source_text != request.text:
             logger.info("factcheck media-focused extraction selected text_preview=%r", claim_source_text[:120])
         initial_language_context = _detect_language_context(request.text, claim_source_text)
@@ -1308,9 +1392,16 @@ async def perform_fact_check(request: FactCheckRequest):
             fallback_claim = ""
 
         logger.info("factcheck extracting candidate claims")
-        extracted_claims = gemini_service.extract_claims(claim_source_text, max_claims=2)
+        model_claims = gemini_service.extract_claims(claim_source_text, max_claims=2)
+        extracted_claims = [
+            claim for claim in model_claims
+            if _is_claim_grounded_in_text(claim, claim_source_text)
+        ]
+        dropped_claims = [claim for claim in model_claims if claim not in extracted_claims]
+        if dropped_claims:
+            logger.warning("dropped ungrounded extracted claims claims=%r source_preview=%r", dropped_claims, claim_source_text[:160])
         if not extracted_claims and not fallback_claim:
-            fallback_claim = claim_source_text[:280]
+            fallback_claim = _fallback_claim_from_post_text(claim_source_text)
         if fallback_claim and fallback_claim not in extracted_claims:
             extracted_claims.insert(0, fallback_claim)
         attribution_claim = _extract_attribution_claim(request.text, _extract_suspected_author(request.text))
