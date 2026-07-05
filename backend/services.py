@@ -475,6 +475,53 @@ TEXT:
                     claims.append(claim)
         return claims[:max_claims]
 
+    def select_claim_to_verify(self, text: str) -> Dict[str, str]:
+        """Choose the single claim the rater should verify."""
+        prompt = f"""You are helping a content moderator decide what to verify.
+Read the full extracted post text and identify the ONE factual claim that should be checked against evidence.
+
+Rules:
+- First decide if there is a verifiable factual claim.
+- Use ONLY information present in TEXT.
+- Choose the claim the post is actually trying to make, not a random detail.
+- If the post contains both caption text and image/media text, use both as context.
+- If the post is advice, opinion, a question, joke, or vague personal experience with no checkable factual assertion, return NO.
+- If the post implies a factual claim through advice or a lifehack, state the implied claim clearly.
+- For war/news posts, choose the concrete event claim: who did what, where, when, and with what result.
+- Preserve important names/terms from the source language when useful, and translate enough for clear searching.
+- Do not introduce outside facts.
+
+Return exactly this format:
+CLAIM_CHECK: <YES or NO or UNCLEAR>
+CLAIM: <one sentence claim to verify, or blank>
+WHY_THIS_CLAIM: <one short reason this is the claim to verify>
+SEARCH_TERMS: <5-12 important search words/names from the post, including source-language terms when useful>
+
+TEXT:
+{text}
+"""
+        result = self._call_model(prompt)
+        parsed = {
+            "claim_check": "UNCLEAR",
+            "claim": "",
+            "reason": "",
+            "search_terms": "",
+        }
+        for line in (result or "").splitlines():
+            if line.startswith("CLAIM_CHECK:"):
+                value = line.split(":", 1)[1].strip().upper()
+                if value in {"YES", "NO", "UNCLEAR"}:
+                    parsed["claim_check"] = value
+            elif line.startswith("CLAIM:"):
+                parsed["claim"] = line.split(":", 1)[1].strip()
+            elif line.startswith("WHY_THIS_CLAIM:"):
+                parsed["reason"] = line.split(":", 1)[1].strip()
+            elif line.startswith("SEARCH_TERMS:"):
+                parsed["search_terms"] = line.split(":", 1)[1].strip()
+        if parsed["claim_check"] == "NO":
+            parsed["claim"] = ""
+        return parsed
+
     def classify_claimability(self, text: str) -> Dict[str, str]:
         """Classify whether text contains a fact-checkable claim."""
         guidance_block = self._guidance_block(text)
@@ -598,7 +645,7 @@ TEXT:
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary. If reliable current-news sources directly report the same factual claim, treat that as supporting evidence rather than calling it Unverified only because no dedicated fact-check exists.
 8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
-10. Provide a structured report in Markdown."""
+10. Provide a concise rater-facing report in Markdown."""
 
         if prioritize_authorship:
             task_steps = f"""1. Identify exactly what factual claim is being made, without assuming it is true or false.
@@ -610,7 +657,7 @@ TEXT:
 7. Use direct fact-checks, wire reports, official records, or primary-source reporting over generic commentary. If reliable current-news sources directly report the same factual claim, treat that as supporting evidence rather than calling it Unverified only because no dedicated fact-check exists.
 8. Support any language. For Ukraine-related claims, prioritize Ukrainian fact-checkers and credible Ukrainian outlets alongside wire services and official sources. For Spanish-language claims, prioritize Spanish-language fact-checkers, credible Spanish-language news, wire services, and official sources.
 9. If the sources are only background explainers and do not directly verify the claim, say so and lower confidence.
-10. Provide a structured report in Markdown."""
+10. Provide a concise rater-facing report in Markdown."""
 
         prompt = f"""You are an expert fact-checker for the SRT (Social Responsibility Tools) platform.
 Analyze the following claim using the provided search results.
@@ -636,11 +683,12 @@ YOUR TASK:
 {task_steps}
 
 STRUCTURE:
-- **Verdict**: (Choose one: True, False, Misleading, Out of Context, Mixed, or Unverified)
-- **Summary**: (2-3 sentences explaining the core finding, starting with the main factual finding)
-- **Attribution Check**: (Only mention this if attribution is actually relevant to the case)
-- **Key Points**: ({key_points_instruction})
-- **Date Check**: (Explicitly state if the event is current or from the past)
+- **Claim Check**: (Say whether the post contains a verifiable factual claim: Yes, No, or Unclear)
+- **Claim**: (State the exact claim being checked in one sentence)
+- **Recommended Rating**: (Choose one: True, False, Partly False, Misleading, Unverified, No Claim, or Needs Review)
+- **Why**: (2-3 short sentences explaining the rating using the evidence)
+- **Evidence**: ({key_points_instruction}; include source names)
+- **Links**: (List the most useful source URLs from the provided search results)
 
 If search results are empty or irrelevant, state "Unverified" and explain why."""
         return self._call_model(prompt)

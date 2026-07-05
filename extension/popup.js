@@ -5,7 +5,6 @@ let BACKEND_URL = `${API_BASE_URL}/factcheck`;
 document.addEventListener('DOMContentLoaded', async () => {
     const isEmbedded = new URLSearchParams(window.location.search).get('embedded') === '1';
     if (isEmbedded) document.body.classList.add('embedded');
-    const cacheBadge = document.getElementById('cache-badge');
     const copyBtn = document.getElementById('copy-btn');
 
     const resultDiv = document.getElementById('result');
@@ -15,8 +14,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
     const saveReviewStatus = document.getElementById('save-review-status');
-    const signalSection = document.getElementById('signal-section');
-    const signalBadges = document.getElementById('signal-badges');
     const decisionSection = document.getElementById('decision-section');
 
     const decisionButtons = document.getElementById('decision-buttons');
@@ -62,54 +59,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         return 'Source';
     }
 
-    function inferTrustSignals(data) {
-        const links = data.evidence_links || [];
-        const verdictText = (data.verdict_md || '').toLowerCase();
-        const directEvidenceCount = links.filter(link => {
-            const type = getSourceType(link);
-            return ['Official', 'Fact-check', 'Institutional', 'News'].includes(type);
-        }).length;
-        const hasOfficial = links.some(link => getSourceType(link) === 'Official');
-        const hasFactCheck = links.some(link => getSourceType(link) === 'Fact-check');
-        const uncertainty = /(unclear|not enough|insufficient|could not verify|no direct evidence|unverified|needs context)/i.test(verdictText);
-
-        let confidence = 'Medium confidence';
-        let className = 'badge-warn';
-        if (directEvidenceCount >= 2 && !uncertainty) {
-            confidence = 'High confidence';
-            className = 'badge-good';
-        } else if (links.length === 0 || uncertainty) {
-            confidence = 'Needs manual review';
-            className = 'badge-risk';
-        }
-
-        const signals = [{ label: confidence, className }];
-        if (data.language_label && data.language_label !== 'Unknown') {
-            const confidenceLabel = data.language_confidence ? ` (${data.language_confidence})` : '';
-            signals.push({ label: `Detected: ${data.language_label}${confidenceLabel}`, className: 'badge-signal' });
-        }
-        signals.push({ label: `${links.length} evidence link${links.length === 1 ? '' : 's'}`, className: links.length ? 'badge-signal' : 'badge-risk' });
-        if (hasOfficial) signals.push({ label: 'Official source found', className: 'badge-good' });
-        if (hasFactCheck) signals.push({ label: 'Fact-check source found', className: 'badge-good' });
-        if (!hasOfficial && !hasFactCheck && links.length) signals.push({ label: 'Review source quality', className: 'badge-warn' });
-        if (data.evidence_strategy === 'refutation') signals.push({ label: 'Refutation-focused search', className: 'badge-warn' });
-        if (data.is_cached) signals.push({ label: 'Cached result', className: 'badge-warn' });
-        if (data.claim_status && data.claim_status !== 'factual_claim') signals.push({ label: data.claim_status.replace(/_/g, ' '), className: 'badge-risk' });
-        return signals;
-    }
-
-    function showTrustSignals(data) {
-        const signals = inferTrustSignals(data);
-        signalBadges.innerHTML = '';
-        signals.forEach(signal => {
-            const badge = document.createElement('span');
-            badge.className = `badge badge-signal ${signal.className}`;
-            badge.textContent = signal.label;
-            signalBadges.appendChild(badge);
-        });
-        signalSection.style.display = 'block';
-    }
-
     function pickDefaultEvidence(data) {
         const links = (data && data.evidence_links) || [];
         return currentSelectedEvidence || links.find(link => !rejectedEvidenceUrls.has(link.url)) || links[0] || null;
@@ -127,12 +76,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentFinalDecision = "";
         rejectedEvidenceUrls = new Set();
 
-        cacheBadge.style.display = 'none';
         resultDiv.style.display = 'none';
         resultDiv.innerHTML = '';
         copyBtn.style.display = 'none';
         loading.style.display = 'none';
-        signalSection.style.display = 'none';
         decisionSection.style.display = 'none';
         saveReviewStatus.style.display = 'none';
         checkBtn.style.display = 'block';
@@ -142,7 +89,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (evidenceSection) evidenceSection.style.display = 'none';
         if (extractedClaimText) extractedClaimText.innerHTML = '';
         if (evidenceLinksDiv) evidenceLinksDiv.innerHTML = '';
-        signalBadges.innerHTML = '';
         decisionButtons.innerHTML = '';
     }
 
@@ -226,16 +172,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             claimText.textContent = claim;
             claimText.style.cssText = 'margin-bottom:6px; color:#27343b; font-size:12px; line-height:1.35;';
 
+            const topLinks = (evidenceLinks || []).slice(0, 3);
             const preview = document.createElement('div');
             preview.className = 'hint-text';
             preview.style.marginBottom = '6px';
-            const topLinks = (evidenceLinks || []).slice(0, 3);
             preview.textContent = topLinks.length
-                ? topLinks.map(link => `${getSourceType(link)}: ${link.title || getDomain(link.url)}`).join(' | ')
-                : 'No preview evidence returned for this claim yet.';
+                ? `Evidence found: ${topLinks.map(link => link.title || getDomain(link.url)).join(' | ')}`
+                : 'Evidence search will run for this claim.';
 
             const chooseBtn = document.createElement('button');
-            chooseBtn.textContent = claim === data.extracted_claim ? 'Selected Claim' : 'Check This Claim';
+            chooseBtn.textContent = claim === data.extracted_claim ? 'Selected' : 'Use This Claim';
             chooseBtn.className = 'retry-btn';
             chooseBtn.style.cssText = 'width:auto; padding:4px 8px; font-size:11px;';
             chooseBtn.disabled = claim === data.extracted_claim;
@@ -505,7 +451,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         loading.firstChild.textContent = 'Searching evidence and analyzing claim';
         resultDiv.style.display = 'none';
         copyBtn.style.display = 'none';
-        cacheBadge.style.display = 'none';
         currentFactCheckData = null;
         currentSelectedEvidence = null;
         currentFinalDecision = "";
@@ -521,11 +466,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Hide previous evidence
         extractedClaimBox.style.display = 'none';
         evidenceSection.style.display = 'none';
-        signalSection.style.display = 'none';
         decisionSection.style.display = 'none';
         evidenceLinksDiv.innerHTML = '';
         extractedClaimText.innerHTML = '';
-        signalBadges.innerHTML = '';
         decisionButtons.innerHTML = '';
 
         try {
@@ -556,11 +499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 post_text: textToAnalyze
             };
 
-            // Show cache badge if applicable
-            if (data.is_cached) cacheBadge.style.display = 'inline-block';
-
             renderClaimOptions(data, extractedClaimBox, extractedClaimText);
-            showTrustSignals(data);
 
             // Show verdict and copy button
             resultDiv.innerHTML = formatMarkdown(data.verdict_md);

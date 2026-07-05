@@ -129,7 +129,7 @@ class ReviewSelectionRequest(BaseModel):
 
 gemini_service = GeminiService()
 
-CACHE_VERSION = "2026-07-04-ukrainian-current-news-search"
+CACHE_VERSION = "2026-07-05-single-claim-selection"
 
 UKRAINIAN_NEWS_DOMAINS = [
     "kyivindependent.com",
@@ -614,7 +614,7 @@ def _fallback_claim_from_post_text(source_text: str) -> str:
     return normalized[:240]
 
 
-def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]:
+def _build_search_queries(original_text: str, extracted_claim: str, search_terms: str = "") -> List[str]:
     def _dedupe(items: List[str]) -> List[str]:
         seen = set()
         ordered = []
@@ -671,6 +671,8 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
     is_spanish_context = language_context["language"] in {"spanish", "spanish_ukraine_context"}
 
     if is_ukraine_context:
+        if search_terms:
+            queries.append(search_terms)
         if source_fragment:
             queries.append(source_fragment)
             first_words = " ".join(source_fragment.split()[:10])
@@ -689,6 +691,8 @@ def _build_search_queries(original_text: str, extracted_claim: str) -> List[str]
             queries.append(f"{extracted_claim} site:{domain}")
         queries.append(f"{extracted_claim} verificación de datos")
         queries.append(f"{extracted_claim} noticias evidencia")
+    if search_terms:
+        queries.append(f"{search_terms} evidence")
     queries.append(f"{extracted_claim} evidence")
     queries.append(f"{extracted_claim} latest reporting")
 
@@ -875,8 +879,8 @@ def _filter_credible(results, category: Optional[str] = None):
     return filtered or results
 
 
-def _search_claim_results(claim_text: str, original_text: str, category: Optional[str], suspected_author: str = "") -> List[Dict]:
-    search_queries = _build_search_queries(original_text, claim_text)
+def _search_claim_results(claim_text: str, original_text: str, category: Optional[str], suspected_author: str = "", search_terms: str = "") -> List[Dict]:
+    search_queries = _build_search_queries(original_text, claim_text, search_terms=search_terms)
     language_context = _detect_language_context(original_text, claim_text)
     is_regional_context = language_context["language"] in {"ukrainian", "ukraine_context", "spanish", "spanish_ukraine_context"}
     collected_results = []
@@ -1459,19 +1463,71 @@ async def perform_fact_check(request: FactCheckRequest):
         else:
             fallback_claim = ""
 
-        logger.info("factcheck extracting candidate claims")
-        model_claims = gemini_service.extract_claims(claim_source_text, max_claims=2)
-        extracted_claims = [
-            claim for claim in model_claims
-            if _is_claim_grounded_in_text(claim, claim_source_text)
-        ]
-        dropped_claims = [claim for claim in model_claims if claim not in extracted_claims]
-        if dropped_claims:
-            logger.warning("dropped ungrounded extracted claims claims=%r source_preview=%r", dropped_claims, claim_source_text[:160])
-        if not extracted_claims and not fallback_claim:
-            fallback_claim = _fallback_claim_from_post_text(claim_source_text)
-        if fallback_claim and fallback_claim not in extracted_claims:
-            extracted_claims.insert(0, fallback_claim)
+        logger.info("factcheck selecting claim to verify")
+        selected = gemini_service.select_claim_to_verify(claim_source_text)
+        selected_claim = selected.get("claim", "").strip()
+        if selected_claim and not _is_claim_grounded_in_text(selected_claim, claim_source_text):
+            logger.warning("dropped ungrounded selected claim claim=%r source_preview=%r", selected_claim, claim_source_text[:160])
+            selected_claim = ""
+
+        if fallback_claim:
+            extracted_claims = [fallback_claim]
+            claim_reason = claim_reason or selected.get("reason", "")
+        elif selected.get("claim_check") == "NO":
+            logger.info("no grounded claim extracted; returning no-claim response")
+            return FactCheckResponse(
+                verdict_md=(
+                    "**Claim Check**: No\n\n"
+                    "**Claim**: No clear verifiable factual claim was found.\n\n"
+                    "**Recommended Rating**: No Claim\n\n"
+                    f"**Why**: {selected.get('reason') or 'The extracted text appears to be advice, opinion, a question, or too vague to verify against evidence.'}\n\n"
+                    "**Evidence**: No evidence search was run because there is no specific factual claim to check.\n\n"
+                    "**Links**: None"
+                ),
+                extracted_claim="",
+                extracted_claims=[],
+                claim_options=[],
+                evidence_links=[],
+                is_cached=False,
+                claim_status="no_claim",
+                claim_reason="No grounded verifiable claim was extracted from the post text.",
+                evidence_strategy="neutral",
+                detected_language=initial_language_context.get("language", "unknown"),
+                language_label=initial_language_context.get("label", "Unknown"),
+                language_confidence=initial_language_context.get("confidence", "low"),
+            )
+        elif selected_claim:
+            extracted_claims = [selected_claim]
+            claim_reason = selected.get("reason", "")
+        else:
+            model_claims = gemini_service.extract_claims(claim_source_text, max_claims=1)
+            extracted_claims = [
+                claim for claim in model_claims
+                if _is_claim_grounded_in_text(claim, claim_source_text)
+            ]
+            if not extracted_claims:
+                logger.info("no grounded fallback claim extracted; returning unclear response")
+                return FactCheckResponse(
+                    verdict_md=(
+                        "**Claim Check**: Unclear\n\n"
+                        "**Claim**: The tool could not identify one clear factual claim to verify.\n\n"
+                        "**Recommended Rating**: Needs Review\n\n"
+                        "**Why**: The post may contain context or implied meaning that needs human judgment before searching evidence.\n\n"
+                        "**Evidence**: No evidence search was run because the claim was unclear.\n\n"
+                        "**Links**: None"
+                    ),
+                    extracted_claim="",
+                    extracted_claims=[],
+                    claim_options=[],
+                    evidence_links=[],
+                    is_cached=False,
+                    claim_status="unclear_claim",
+                    claim_reason=selected.get("reason", "The claim-selection step did not return a grounded claim."),
+                    evidence_strategy="neutral",
+                    detected_language=initial_language_context.get("language", "unknown"),
+                    language_label=initial_language_context.get("label", "Unknown"),
+                    language_confidence=initial_language_context.get("confidence", "low"),
+                )
         attribution_claim = _extract_attribution_claim(request.text, _extract_suspected_author(request.text))
         if attribution_claim and attribution_claim not in extracted_claims:
             extracted_claims.append(attribution_claim)
@@ -1498,6 +1554,7 @@ async def perform_fact_check(request: FactCheckRequest):
             request.text,
             request.category,
             suspected_author=suspected_author,
+            search_terms=selected.get("search_terms", ""),
         )
         for claim in extracted_claims:
             links = []

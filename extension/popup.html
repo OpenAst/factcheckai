@@ -109,48 +109,6 @@
       background: #bdc3c7;
     }
 
-    .badge {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: bold;
-      text-transform: uppercase;
-      margin-left: 5px;
-      vertical-align: middle;
-    }
-
-    .badge-cached {
-      background: #e67e22;
-      color: white;
-    }
-
-    .badge-signal {
-      margin: 0 5px 6px 0;
-      text-transform: none;
-      background: #eef5ff;
-      color: #24527a;
-      border: 1px solid #d6e7f7;
-    }
-
-    .badge-good {
-      background: #ecf9f1;
-      color: #17643a;
-      border-color: #c9ead6;
-    }
-
-    .badge-warn {
-      background: #fff7e6;
-      color: #8a5a00;
-      border-color: #f4d79a;
-    }
-
-    .badge-risk {
-      background: #fff1f0;
-      color: #8a1f17;
-      border-color: #f1c1bc;
-    }
-
     .copy-btn {
       margin-top: 10px;
       background: #27ae60;
@@ -243,15 +201,15 @@
     .evidence-item {
       margin-bottom: 8px;
       padding: 8px;
-      background: #f7faf9;
-      border: 1px solid #e1ebe7;
+      background: #fff;
+      border: 1px solid #ddd;
       border-radius: 6px;
     }
 
     .claim-option.active,
     .evidence-item.best {
-      border-color: #16a085;
-      background: #ecf9f6;
+      border-color: #999;
+      background: #fafafa;
     }
 
     .evidence-item.rejected {
@@ -311,7 +269,6 @@
 <body>
   <div class="header">
     <h2 id="title">SRT Fact-Check AI</h2>
-    <span id="cache-badge" class="badge badge-cached" style="display: none;">Cached</span>
   </div>
 
   <textarea id="detected-text" class="content-box" style="min-height: 120px; height: 120px;">
@@ -335,17 +292,9 @@
 
   <div id="extracted-claim-box" class="section">
     <div class="section-title">
-      <span>Possible Claims</span>
-      <span class="hint-text">Pick the strongest checkable claim</span>
+      <span>Claim</span>
     </div>
     <div id="extracted-claim-text"></div>
-  </div>
-
-  <div id="signal-section" class="section">
-    <div class="section-title">
-      <span>Trust Signals</span>
-    </div>
-    <div id="signal-badges"></div>
   </div>
 
   <div id="result"></div>
