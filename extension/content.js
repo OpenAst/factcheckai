@@ -167,6 +167,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ pinned: !!__factcheck_overlay_root });
             return true;
         }
+
+        if (request.action === 'hideForCapture') {
+            if (__factcheck_overlay_root) __factcheck_overlay_root.style.visibility = 'hidden';
+            if (__factcheck_overlay_toolbar) __factcheck_overlay_toolbar.style.visibility = 'hidden';
+            sendResponse({ hidden: true });
+            return true;
+        }
+
+        if (request.action === 'showAfterCapture') {
+            if (__factcheck_overlay_root) __factcheck_overlay_root.style.visibility = '';
+            if (__factcheck_overlay_toolbar) __factcheck_overlay_toolbar.style.visibility = '';
+            sendResponse({ hidden: false });
+            return true;
+        }
     }
     return true;
 });

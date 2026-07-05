@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const resultDiv = document.getElementById('result');
     const retryBtn = document.getElementById('retry-btn');
     const pinBtn = document.getElementById('pin-btn');
+    const mediaBtn = document.getElementById('media-btn');
+    const listenBtn = document.getElementById('listen-btn');
     const checkBtn = document.getElementById('check-btn');
     const detectedTextDiv = document.getElementById('detected-text');
     const loading = document.getElementById('loading');
@@ -399,6 +401,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             return chrome.tabs.sendMessage(tabId, { action });
         }
     }
+
+    window.SRTCaptureTools.initCaptureTools({
+        apiBaseUrl: API_BASE_URL,
+        isEmbedded,
+        mediaBtn,
+        listenBtn,
+        detectedTextDiv,
+        checkBtn,
+        setMiniStatus,
+        formatError,
+        readErrorDetail,
+        sendPinMessage
+    });
 
     // Pin to page button
     if (pinBtn) {

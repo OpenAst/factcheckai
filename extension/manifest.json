@@ -11,7 +11,8 @@
   "permissions": [
     "activeTab",
     "tabs",
-    "scripting"
+    "scripting",
+    "tabCapture"
   ],
   "host_permissions": [
     "https://*.facebook.com/*",
@@ -51,6 +52,7 @@
     {
       "resources": [
         "popup.html",
+        "capture_tools.js",
         "popup.js"
       ],
       "matches": [

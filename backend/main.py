@@ -14,10 +14,12 @@ try:
     from .logging_config import configure_logging
     from .services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from .database import init_db, CacheService, CuratedEvidenceService, ReviewService
+    from .media_routes import router as media_router
 except ImportError:
     from logging_config import configure_logging
     from services import SerperService, GeminiService, DuckDuckGoService, _is_social_link, _is_pdf_link
     from database import init_db, CacheService, CuratedEvidenceService, ReviewService
+    from media_routes import router as media_router
 
 load_dotenv()
 configure_logging()
@@ -72,6 +74,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(media_router)
 
 class FactCheckRequest(BaseModel):
     text: str
